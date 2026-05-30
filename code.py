@@ -1,6 +1,16 @@
-# SPDX-FileCopyrightText: 2026 Joe Engineer
+# =============================================================================
+# Traffic Matrix NY — LED Highway Sign Display for Matrix Portal S3
+# =============================================================================
+# Copyright (C) 2026 Keith Elkin
+# https://keithelkin.com
 #
-# SPDX-License-Identifier: Apache-2.0
+# This project fetches live traffic message sign data from the NY511 API
+# and displays it on an Adafruit Matrix Portal S3 driving RGB LED panels,
+# replicating the appearance of highway variable message signs.
+#
+# All rights reserved. Unauthorized redistribution or commercial use
+# without explicit written permission from the author is prohibited.
+# =============================================================================
 
 """
 Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
@@ -35,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.44"
+LOCAL_VERSION = "2.2.45"
 
 # --- Imports ---
 import ssl
@@ -255,16 +265,17 @@ def remap_color(rgb_int, order):
     return (out[0] << 16) | (out[1] << 8) | out[2]
 
 def color_for_display(hex_str):
-    """Convert a hex color string to the remapped integer needed by set_text_color()
-    given the current color_order setting. Use this everywhere instead of hex_to_int()
-    for colors that will be displayed on the matrix."""
-    return remap_color(hex_to_int(hex_str), color_order)
+    """Convert a hex color string to the integer needed by set_text_color().
+    The hardware color_order passed to MatrixPortal at init handles all channel
+    remapping at the driver level. Our software just passes the raw RGB value.
+    """
+    return hex_to_int(hex_str)
 
 settings = load_settings()
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
-sign_text_color     = [hex_to_int(settings.get("sign_text_color", "#F7B500"))]  # Raw color — set_text_color() ignores color_order
-sign_name_color     = [hex_to_int(settings.get("sign_name_color",  "#0000FF"))]  # Raw color — set_text_color() ignores color_order
+sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
+sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]  # Remapped for hardware color order
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -1323,8 +1334,8 @@ if HAS_HTTPSERVER and pool is not None:
                 msg_disp_secs    = new_msg_secs
                 page_disp_secs   = new_page_secs
                 cycle_sleep_secs = new_cycle_secs
-                sign_text_color[0] = hex_to_int(new_color)
-                sign_name_color[0] = hex_to_int(new_name_color)
+                sign_text_color[0] = color_for_display(new_color)
+                sign_name_color[0] = color_for_display(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
                 # brightness requires reboot to apply (bit_depth change)
 
@@ -1881,8 +1892,8 @@ if HAS_HTTPSERVER and pool is not None:
                         # Reload settings into memory
                         loaded = load_settings()
                         settings.update(loaded)
-                        sign_text_color[0] = hex_to_int(settings.get("sign_text_color","#F7B500"))
-                        sign_name_color[0] = hex_to_int(settings.get("sign_name_color","#0000FF"))
+                        sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
+                        sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
                         matrixportal.set_text_color(sign_text_color[0], 0)
                         status_lines.append("&#x2713; settings.json synced")
                     else:
