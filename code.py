@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.54"
+LOCAL_VERSION = "2.2.55"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1496,6 +1496,7 @@ if HAS_HTTPSERVER and pool is not None:
                 'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
                 '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
                 ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
+                ' <a href="/signs"><button class="btn-gray" type="button">&#x1F6A6; Browse Roadways</button></a>'
                 '</form><br>'
                 + (('<div style="margin-bottom:8px">'
                 '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
