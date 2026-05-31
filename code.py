@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.52"
+LOCAL_VERSION = "2.2.53"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1454,7 +1454,18 @@ if HAS_HTTPSERVER and pool is not None:
                     sign_count_text = str(len(all_items)) + " favorite signs."
                 else:
                     sign_count_text = str(len(all_items)) + " signs shown."
+
+                # Back button — returns to roadway list or clears filter
+                if query.startswith("__roadway__:"):
+                    back_btn = ('<a href="/signs"><button class="btn-gray">'
+                                '&#x2190; Back to Roadways</button></a>&nbsp;')
+                elif query == "__favorites__":
+                    back_btn = ('<a href="/signs"><button class="btn-gray">'
+                                '&#x2190; Back</button></a>&nbsp;')
+                else:
+                    back_btn = ""
                 list_section = (
+                    back_btn +
                     '<form method="POST" action="/save-signs">'
                     '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
                     '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
