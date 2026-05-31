@@ -45,7 +45,17 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.46"
+LOCAL_VERSION = "2.2.48"
+
+# --- Display color constants (hardware-correct: no software remapping needed) ---
+# The color_order setting passed to MatrixPortal handles channel mapping at the
+# driver level. These are the colors as the user perceives them.
+COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
+COLOR_GREEN  = 0x00FF00  # Success / connected / verified
+COLOR_RED    = 0xFF0000  # Error / failed
+COLOR_AMBER  = 0xFF8800  # Warning / pending reboot
+COLOR_YELLOW = 0xFFFF00  # Data / version numbers
+COLOR_WHITE  = 0xFFFFFF  # Neutral / default
 
 # --- Imports ---
 import ssl
@@ -241,33 +251,10 @@ def hex_to_int(hex_str):
     except Exception:
         return 0xF7B500  # fallback to sign yellow
 
-def remap_color(rgb_int, order):
-    """Remap a 'what you want to see' RGB integer to the value that must be
-    sent to set_text_color() to produce the correct color on screen given
-    the hardware's channel order (color_order setting).
-
-    Example: with BGR order, to display yellow (#FFFF00) the hardware needs
-    to receive cyan (#00FFFF) because it swaps R and B channels.
-    With RGB order the value passes through unchanged.
-    """
-    r = (rgb_int >> 16) & 0xFF
-    g = (rgb_int >> 8)  & 0xFF
-    b =  rgb_int        & 0xFF
-    mapping = {
-        "RGB": (r, g, b),
-        "RBG": (r, b, g),
-        "GRB": (g, r, b),
-        "GBR": (g, b, r),
-        "BRG": (b, r, g),
-        "BGR": (b, g, r),
-    }
-    out = mapping.get(order.upper(), (r, g, b))
-    return (out[0] << 16) | (out[1] << 8) | out[2]
-
 def color_for_display(hex_str):
     """Convert a hex color string to the integer needed by set_text_color().
     The hardware color_order passed to MatrixPortal at init handles all channel
-    remapping at the driver level. Our software just passes the raw RGB value.
+    remapping at the driver level. No software remapping needed.
     """
     return hex_to_int(hex_str)
 
@@ -475,14 +462,10 @@ def paginate_message(msg_string, lines_per_page=3):
     return pages if pages else [""]
 
 def display_sign(match, name_secs, page_secs, lines_per_page=3):
-    """Display one matched sign: name first, then all message pages in order.
+    """Display one matched sign: name first, then all message pages in order."""
+    if _reboot_pending[0]:
+        return  # Exit immediately if reboot requested
 
-    match dict: {"name": str, "msg": list_or_str}
-    - msg may be a list of separate messages (each possibly multi-line)
-      or a plain string (legacy single-message signs).
-    - Each message is paginated to lines_per_page lines per screen.
-    - Sign name shown once; all pages of all messages follow.
-    """
     # Show sign name
     clean_name = clean_string(match["name"])
     centered_name = center_multiline_string(clean_name, characters_per_line)
@@ -491,6 +474,9 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     matrixportal.set_text(centered_name, 0)
     safe_delay(name_secs)
     w.feed()
+
+    if _reboot_pending[0]:
+        return  # Reboot requested after name display
 
     # Normalise messages to a list
     raw_messages = match["msg"]
@@ -502,9 +488,13 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     # Display each message, paginated
     matrixportal.set_text_color(sign_text_color[0], 0)
     for raw_msg in raw_messages:
+        if _reboot_pending[0]:
+            return  # Exit immediately if reboot requested
         clean_msg = clean_string(raw_msg)
         pages = paginate_message(clean_msg, lines_per_page)
         for page in pages:
+            if _reboot_pending[0]:
+                return  # Exit immediately if reboot requested
             centered_page = center_multiline_string(page, characters_per_line)
             print(f"Page:\n{centered_page}")
             matrixportal.set_text(centered_page, 0)
@@ -714,7 +704,7 @@ def connect_wifi():
     ssid = secrets.get("ssid", "")
     print(f"Connecting to WiFi: {ssid}")
     try:
-        matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
+        matrixportal.set_text_color(COLOR_CYAN, 0)
         matrixportal.set_text(center_multiline_string(f"CONNECTING\n{ssid}", characters_per_line), 0)
     except Exception:
         pass
@@ -725,7 +715,7 @@ def connect_wifi():
         ip = str(wifi.radio.ipv4_address)
         print(f"Connected! IP: {ip}")
         try:
-            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text_color(COLOR_GREEN, 0)
             matrixportal.set_text(center_multiline_string(f"{ip}\n{ssid}", characters_per_line), 0)
             safe_delay(5)
         except Exception:
@@ -734,7 +724,7 @@ def connect_wifi():
     except Exception as e:
         print(f"WiFi connection failed: {e}")
         try:
-            matrixportal.set_text_color(0xFF0000, 0)  # Red
+            matrixportal.set_text_color(COLOR_RED, 0)
             matrixportal.set_text(center_multiline_string("WIFI\nFAILED", characters_per_line), 0)
         except Exception:
             pass
@@ -757,10 +747,10 @@ if connect_wifi():
     # Show web server status on matrix
     try:
         if HAS_HTTPSERVER:
-            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text_color(COLOR_GREEN, 0)
             matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line), 0)
         else:
-            matrixportal.set_text_color(0xFF0000, 0)  # Red
+            matrixportal.set_text_color(COLOR_RED, 0)
             matrixportal.set_text(center_multiline_string(f"WEB ERR\n{web_error_message}", characters_per_line), 0)
         safe_delay(3)
     except Exception:
@@ -787,7 +777,7 @@ def perform_ota_check(requests_session, force=False):
     print(f"Checking for updates... Local: {LOCAL_VERSION}")
 
     # Display local version on matrix
-    matrixportal.set_text_color(0x00FFFF, 0)  # Cyan
+    matrixportal.set_text_color(COLOR_CYAN, 0)
     matrixportal.set_text(center_multiline_string(f"LOCAL\nVERSION\n{LOCAL_VERSION}", characters_per_line), 0)
     safe_delay(2)
 
@@ -837,13 +827,13 @@ def perform_ota_check(requests_session, force=False):
         print(f"Remote version: {remote_version}")
 
         # Display remote version on matrix
-        matrixportal.set_text_color(0xFFFF00, 0)  # Yellow
+        matrixportal.set_text_color(COLOR_YELLOW, 0)
         matrixportal.set_text(center_multiline_string(f"CLOUD\nVERSION\n{remote_version}", characters_per_line), 0)
         safe_delay(2)
 
         if remote_version == LOCAL_VERSION and not force:
             print("Firmware is up to date!")
-            matrixportal.set_text_color(0x00FF00, 0)  # Green
+            matrixportal.set_text_color(COLOR_GREEN, 0)
             matrixportal.set_text(center_multiline_string("VERSION\nVERIFIED\nUP TO DATE", characters_per_line), 0)
             safe_delay(2)
             return
@@ -1097,8 +1087,8 @@ if HAS_HTTPSERVER and pool is not None:
 
 
         # ── GET /color-test/<order> — Test a color order directly ───────
-        # Bypasses remap_color and sends raw yellow/blue directly to the
-        # display with the given color_order — helps find correct order empirically.
+        # Sends raw yellow directly to the display with the given color_order.
+        # Helps find correct order empirically — no software remapping applied.
         # Usage: navigate to /color-test/RGB, /color-test/GBR etc.
         @server.route("/color-test/<order>", GET)
         def route_color_test(request, order):
@@ -1178,7 +1168,7 @@ if HAS_HTTPSERVER and pool is not None:
         def route_reboot(request):
             print("Reboot requested via web UI.")
             try:
-                matrixportal.set_text_color(0xFF8800, 0)  # Amber
+                matrixportal.set_text_color(COLOR_AMBER, 0)
                 matrixportal.set_text(center_multiline_string("REBOOT\nPENDING", characters_per_line), 0)
             except Exception:
                 pass
@@ -2072,6 +2062,8 @@ while True:
                 poll_server()  # Service web requests before display loop
 
                 for match in matched_signs:
+                    if _reboot_pending[0]:
+                        break  # Reboot requested — stop cycling signs immediately
                     w.feed()
                     print(f"\nMATCH: {match['name']}")
                     display_sign(match, name_disp_secs, page_disp_secs)
