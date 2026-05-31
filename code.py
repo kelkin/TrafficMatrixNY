@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.53"
+LOCAL_VERSION = "2.2.54"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1490,7 +1490,7 @@ if HAS_HTTPSERVER and pool is not None:
                  if cached else
                  '<p style="color:#aaa">No sign cache. Click Refresh to load from NY511.</p>') +
                 '<form method="POST" action="/signs-search">'
-                '<input type="text" name="q" value="' + query + '" '
+                '<input type="text" name="q" value="' + (query if not query.startswith("__") else "") + '" '
                 'placeholder="Search by sign name or roadway..." autocomplete="off" '
                 'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
                 'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
