@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.48"
+LOCAL_VERSION = "2.2.51"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1330,8 +1330,12 @@ if HAS_HTTPSERVER and pool is not None:
                 # brightness requires reboot to apply (bit_depth change)
 
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
-                status = ("Saved! Reboot required to apply changes." if needs_reboot else "Saved!") if ok else "Save failed."
-                cls = "status-ok" if ok else "status-err"
+                if ok:
+                    status = "Saved! Reboot required to apply color order or brightness change." if needs_reboot else "Saved! Settings applied."
+                    cls = "status-ok"
+                else:
+                    status = "Save failed."
+                    cls = "status-err"
                 print("Settings saved: order=" + new_order
                       + " msg_color=" + new_color + " name_color=" + new_name_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
@@ -1347,9 +1351,10 @@ if HAS_HTTPSERVER and pool is not None:
                 "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
                 "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
                 "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
-                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
-                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
-                "</form></div></body></html>"
+                + ("&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                   "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
+                   "</form>" if needs_reboot else "") +
+                "</div></body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
@@ -1363,16 +1368,18 @@ if HAS_HTTPSERVER and pool is not None:
 
             # Only build the full list when there's a search filter or show_all is set.
             # Loading all 937 signs takes 30-60 seconds — require a search first.
-            if query:
+            if query == "__favorites__":
+                all_items = sorted([s for s in cached if s["name"] in favs],
+                                   key=lambda s: s["name"])
+            elif query.startswith("__roadway__:"):
+                rw = query[12:]  # strip prefix
+                all_items = sorted([s for s in cached
+                                    if s.get("roadway","").lower() == rw.lower()],
+                                   key=lambda s: s["name"])
+            elif query:
                 all_items = [s for s in cached if
                              query in s["name"].lower() or
                              query in s.get("roadway", "").lower()]
-            elif _signs_show_all[0]:
-                fav_items   = sorted([s for s in cached if s["name"] in favs],
-                                     key=lambda s: s["name"])
-                other_items = sorted([s for s in cached if s["name"] not in favs],
-                                     key=lambda s: s["name"])
-                all_items   = fav_items + other_items
             else:
                 all_items = None  # Show prompt instead
             w.feed()
@@ -1380,11 +1387,35 @@ if HAS_HTTPSERVER and pool is not None:
             if all_items is None:
                 items_html = ""
                 sign_count_text = str(len(cached)) + " signs cached."
+                fav_count = len([s for s in cached if s["name"] in favs])
+
+                # Build sorted unique roadway list for browser
+                roadways = sorted(set(
+                    s.get("roadway","").strip()
+                    for s in cached
+                    if s.get("roadway","").strip()
+                ))
+                w.feed()
+
+                rw_buttons = "".join(
+                    '<a href="/signs-roadway/' +
+                    rw.replace(" ","+").replace("/","%2F").replace("&","%26") +
+                    '"><button class="btn-gray" style="margin:3px;font-size:0.8em">' +
+                    rw + '</button></a>'
+                    for rw in roadways
+                )
+                w.feed()
+
                 list_section = (
-                    '<p style="color:#aaa">Search for signs by name or roadway, or click '
-                    'Show All to browse all ' + str(len(cached)) + ' signs '
-                    '(takes 30-60 seconds to load).</p>'
-                    '<a href="/signs-all"><button class="btn-gray">&#x1F4CB; Show All Signs</button></a>'
+                    '<p style="color:#aaa">You have '
+                    '<strong style="color:#F7B500">' + str(fav_count) + ' favorites</strong> saved. '
+                    'Search by name/roadway above, browse by roadway below, '
+                    'or view your favorites.</p>'
+                    '<a href="/signs-favorites"><button class="btn-cyan">&#x2B50; My Favorites</button></a>'
+                    '<br><br>'
+                    '<div style="color:#ffaa00;font-weight:bold;margin-bottom:8px">'
+                    '&#x1F6A6; Browse by Roadway</div>'
+                    '<div style="line-height:2">' + rw_buttons + '</div>'
                 )
             else:
                 items_parts = []
@@ -1414,7 +1445,13 @@ if HAS_HTTPSERVER and pool is not None:
                 items_parts = None
                 w.feed()
                 gc.collect()
-                sign_count_text = str(len(all_items)) + " signs shown."
+                if query.startswith("__roadway__:"):
+                    sign_count_text = (str(len(all_items)) + " signs on " +
+                                      query[12:] + ".")
+                elif query == "__favorites__":
+                    sign_count_text = str(len(all_items)) + " favorite signs."
+                else:
+                    sign_count_text = str(len(all_items)) + " signs shown."
                 list_section = (
                     '<form method="POST" action="/save-signs">'
                     '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
@@ -1474,11 +1511,24 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
 
-        # ── GET /signs-all — Show full unfiltered sign list ──────────────
-        @server.route("/signs-all", GET)
-        def route_signs_all(request):
-            _signs_filter[0]   = ""
-            _signs_show_all[0] = True
+        # ── GET /signs-roadway/<rw> — Browse signs on a specific roadway ──
+        @server.route("/signs-roadway/<rw>", GET)
+        def route_signs_roadway(request, rw):
+            # URL-decode the roadway name
+            roadway = rw.replace("+", " ")
+            for code, char in [("%2F","/"),("%26","&"),("%2D","-"),
+                                ("%28","("),("%29",")"),("%2C",",")]:
+                roadway = roadway.replace(code, char).replace(code.lower(), char)
+            _signs_filter[0] = "__roadway__:" + roadway
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── GET /signs-favorites — Show only favorited signs ─────────────
+        @server.route("/signs-favorites", GET)
+        def route_signs_favorites(request):
+            _signs_filter[0]   = "__favorites__"
+            _signs_show_all[0] = False
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
@@ -1489,7 +1539,6 @@ if HAS_HTTPSERVER and pool is not None:
             p = parse_post_body(request)
             q = p.get("q", "").strip().lower()
             _signs_filter[0]   = q
-            _signs_show_all[0] = bool(q)  # show results only if query non-empty
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/signs", "Connection": "close"},
                           body="")
