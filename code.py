@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.51"
+LOCAL_VERSION = "2.2.52"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1397,11 +1397,13 @@ if HAS_HTTPSERVER and pool is not None:
                 ))
                 w.feed()
 
-                rw_buttons = "".join(
+                rw_items = "".join(
+                    '<div class="sign-item">'
                     '<a href="/signs-roadway/' +
                     rw.replace(" ","+").replace("/","%2F").replace("&","%26") +
-                    '"><button class="btn-gray" style="margin:3px;font-size:0.8em">' +
-                    rw + '</button></a>'
+                    '" style="color:#eee;text-decoration:none">'
+                    '&#x1F6A6; ' + rw + '</a>'
+                    '</div>'
                     for rw in roadways
                 )
                 w.feed()
@@ -1415,7 +1417,7 @@ if HAS_HTTPSERVER and pool is not None:
                     '<br><br>'
                     '<div style="color:#ffaa00;font-weight:bold;margin-bottom:8px">'
                     '&#x1F6A6; Browse by Roadway</div>'
-                    '<div style="line-height:2">' + rw_buttons + '</div>'
+                    '<div class="sign-list">' + rw_items + '</div>'
                 )
             else:
                 items_parts = []
