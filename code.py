@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.55"
+LOCAL_VERSION = "2.2.56"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1419,6 +1419,7 @@ if HAS_HTTPSERVER and pool is not None:
                     '&#x1F6A6; Browse by Roadway</div>'
                     '<div class="sign-list">' + rw_items + '</div>'
                 )
+                breadcrumb = ""  # No breadcrumb on home view
             else:
                 items_parts = []
                 for i, sign in enumerate(all_items):
@@ -1455,17 +1456,41 @@ if HAS_HTTPSERVER and pool is not None:
                 else:
                     sign_count_text = str(len(all_items)) + " signs shown."
 
-                # Back button — returns to roadway list or clears filter
+                # Breadcrumb trail
+                crumb_base = '<a href="/signs" style="color:#00ccff">&#x1F6A6; Traffic Signs</a>'
                 if query.startswith("__roadway__:"):
-                    back_btn = ('<a href="/signs"><button class="btn-gray">'
-                                '&#x2190; Back to Roadways</button></a>&nbsp;')
+                    rw_name = query[12:]
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">' + rw_name + '</span>'
+                        '</div>'
+                    )
                 elif query == "__favorites__":
-                    back_btn = ('<a href="/signs"><button class="btn-gray">'
-                                '&#x2190; Back</button></a>&nbsp;')
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">&#x2B50; My Favorites</span>'
+                        '</div>'
+                    )
+                elif query:
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">Search: &ldquo;' + query + '&rdquo;</span>'
+                        '</div>'
+                    )
                 else:
-                    back_btn = ""
+                    breadcrumb = ""
+                back_btn = ""  # Replaced by breadcrumb
                 list_section = (
-                    back_btn +
+                    breadcrumb +
                     '<form method="POST" action="/save-signs">'
                     '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
                     '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
@@ -1496,7 +1521,6 @@ if HAS_HTTPSERVER and pool is not None:
                 'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
                 '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
                 ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
-                ' <a href="/signs"><button class="btn-gray" type="button">&#x1F6A6; Browse Roadways</button></a>'
                 '</form><br>'
                 + (('<div style="margin-bottom:8px">'
                 '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
