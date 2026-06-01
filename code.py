@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.66"
+LOCAL_VERSION = "2.2.67"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -691,6 +691,7 @@ def poll_server():
 _calib_state          = {"active": False}
 _refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
 _reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
+_id_flash_pending      = [False]  # Set by /identify route, main loop flashes unit name on panels
 _signs_filter          = [""]    # Current search filter for signs page
 _signs_show_all        = [False] # Whether to show full unfiltered list
 _api_error             = [""]    # Non-empty = API error message, stops fetching until cleared
@@ -1223,6 +1224,24 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Location": "/rebooting", "Connection": "close"},
                           body="")
 
+        # ── POST /identify — Flash unit name on panels so you know which sign you're looking at ─
+        @server.route("/identify", "POST")
+        def route_identify(request):
+            _id_flash_pending[0] = True
+            unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
+            print(f"ID flash queued: {unit_label!r}")
+            body = (
+                html_head("Identifying...") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"status-ok\">"
+                "&#x1F4A1; Flashing sign now &mdash; watch the panels!</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                            headers={"Connection": "close"}, body=body)
+
         # ── GET /settings ─────────────────────────────────────────────────
         @server.route("/settings", GET)
         def route_settings(request):
@@ -1262,10 +1281,13 @@ if HAS_HTTPSERVER and pool is not None:
                 if _api_error[0] else ""
                 ) +
 
-                # Reboot
+                # Reboot + ID flash
                 "<div class=\"card\"><h2>System</h2>"
                 "<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Board</button>"
+                "</form>"
+                "&nbsp;<form method=\"POST\" action=\"/identify\" style=\"display:inline\">"
+                "<button class=\"btn-yellow\" type=\"submit\">&#x1F4A1; ID This Sign</button>"
                 "</form></div>"
 
                 # All settings in one form
@@ -2182,6 +2204,22 @@ while True:
             continue
         else:
             print("Cache refresh skipped — no network.")
+
+    # Handle ID flash request — alternates colors on the display so you know which unit this is
+    if _id_flash_pending[0]:
+        _id_flash_pending[0] = False
+        unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
+        print(f"ID flash: displaying {unit_label!r}")
+        flash_colors = [COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED,
+                        COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED]
+        for fc in flash_colors:
+            w.feed()
+            matrixportal.set_text_color(fc, 0)
+            matrixportal.set_text(center_multiline_string(unit_label, characters_per_line), 0)
+            time.sleep(0.4)
+        # Restore display to blank so main loop resumes normally
+        matrixportal.set_text("", 0)
+        print("ID flash complete.")
 
     # Reconnect WiFi if dropped
     if not wifi.radio.connected:
