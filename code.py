@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.67"
+LOCAL_VERSION = "2.2.68"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -476,8 +476,8 @@ def paginate_message(msg_string, lines_per_page=3):
 
 def display_sign(match, name_secs, page_secs, lines_per_page=3):
     """Display one matched sign: name first, then all message pages in order."""
-    if _reboot_pending[0]:
-        return  # Exit immediately if reboot requested
+    if _reboot_pending[0] or _id_flash_pending[0]:
+        return  # Exit immediately if reboot or ID flash requested
 
     # Show sign name
     clean_name = clean_string(match["name"])
@@ -488,8 +488,8 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     safe_delay(name_secs)
     w.feed()
 
-    if _reboot_pending[0]:
-        return  # Reboot requested after name display
+    if _reboot_pending[0] or _id_flash_pending[0]:
+        return  # Exit if reboot or ID flash requested after name display
 
     # Normalise messages to a list
     raw_messages = match["msg"]
@@ -501,13 +501,13 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     # Display each message, paginated
     matrixportal.set_text_color(sign_text_color[0], 0)
     for raw_msg in raw_messages:
-        if _reboot_pending[0]:
-            return  # Exit immediately if reboot requested
+        if _reboot_pending[0] or _id_flash_pending[0]:
+            return  # Exit immediately if reboot or ID flash requested
         clean_msg = clean_string(raw_msg)
         pages = paginate_message(clean_msg, lines_per_page)
         for page in pages:
-            if _reboot_pending[0]:
-                return  # Exit immediately if reboot requested
+            if _reboot_pending[0] or _id_flash_pending[0]:
+                return  # Exit immediately if reboot or ID flash requested
             centered_page = center_multiline_string(page, characters_per_line)
             print(f"Page:\n{centered_page}")
             matrixportal.set_text(centered_page, 0)
@@ -701,13 +701,16 @@ _signs_show_all        = [False] # Whether to show full unfiltered list
 def safe_delay(seconds):
     """Sleeps for `seconds` while continuously feeding the watchdog and
     polling the web server so the log page stays responsive.
-    Exits early if _reboot_pending is set so reboots happen within seconds
-    rather than waiting for the current display cycle to finish."""
+    Exits early if _reboot_pending or _id_flash_pending is set so those
+    actions happen within seconds rather than waiting for the current
+    display cycle to finish."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         poll_server()  # includes w.feed() before and after
         if _reboot_pending[0]:
             return  # Exit early — main loop will handle the reboot
+        if _id_flash_pending[0]:
+            return  # Exit early — main loop will handle the ID flash
         time.sleep(0.01)
 
 # --- WiFi Connection ---
