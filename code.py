@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.56"
+LOCAL_VERSION = "2.2.57"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -188,7 +188,11 @@ except ImportError:
     raise
 
 # NY511 API URL — only the key comes from secrets, everything else is static
-NY511_URL = "https://511ny.org/api/getmessagesigns?format=json&key=" + secrets["ny511key"]
+# API URL and key — read from settings.json first, fall back to secrets.py
+# This allows customers to configure via web UI without needing Thonny
+_api_url = settings.get("api_url", "https://511ny.org/api/getmessagesigns?format=json&key=")
+_api_key = settings.get("api_key", "") or secrets.get("ny511key", "")
+NY511_URL = _api_url + _api_key
 
 # OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
 ENABLE_OTA   = secrets.get("enable_ota", False)
@@ -214,6 +218,8 @@ _default_settings = {
     "characters_per_line":  30,      # Text wrapping width
     "brightness":           0.8,     # Display brightness 0.0-1.0
     "log_refresh_seconds":  5,       # Log page auto-refresh interval (0=disabled)
+    "api_url":              "https://511ny.org/api/getmessagesigns?format=json&key=",
+    "api_key":              "",      # Set via web UI or secrets.py
 }
 
 def load_settings():
@@ -1249,6 +1255,20 @@ if HAS_HTTPSERVER and pool is not None:
                 "document.getElementById('cprev_text').style.background=this.value;};</script>"
                 "</div>"
 
+                "<div class=\"row\"><label>API URL:</label>"
+                "<input type=\"text\" name=\"api_url\" value=\"" +
+                settings.get("api_url","https://511ny.org/api/getmessagesigns?format=json&key=") +
+                "\" style=\"width:420px;background:#222;color:#eee;border:1px solid #555;"
+                "border-radius:4px;padding:5px;font-family:monospace;font-size:0.85em\">"
+                "</div>"
+                "<div class=\"row\"><label>API Key:</label>"
+                "<input type=\"text\" name=\"api_key\" value=\"" +
+                settings.get("api_key","") +
+                "\" style=\"width:280px;background:#222;color:#eee;border:1px solid #555;"
+                "border-radius:4px;padding:5px;font-family:monospace\">"
+                "<small style=\"color:#888;margin-left:8px\">Customer API key for your data provider</small>"
+                "</div>"
+
                 "<div class=\"row\"><label>Name display:</label>" +
                 hms_inputs("name", n_h, n_m, n_s) + "</div>"
 
@@ -1285,6 +1305,8 @@ if HAS_HTTPSERVER and pool is not None:
                 new_order = p.get("color_order", settings.get("color_order", "RGB")).upper()
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
+                new_api_url = p.get("api_url", settings.get("api_url", "")).strip()
+                new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
                 try:
                     new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
@@ -1309,6 +1331,8 @@ if HAS_HTTPSERVER and pool is not None:
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
                 settings["depth"]                = new_depth
+                settings["api_url"]              = new_api_url
+                settings["api_key"]              = new_api_key
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
@@ -1327,6 +1351,9 @@ if HAS_HTTPSERVER and pool is not None:
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
                 matrixportal.set_text_color(sign_text_color[0], 0)
+                # Rebuild NY511_URL with new api_url/api_key if changed
+                global NY511_URL
+                NY511_URL = new_api_url + new_api_key
                 # brightness requires reboot to apply (bit_depth change)
 
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
