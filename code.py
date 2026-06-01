@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.63"
+LOCAL_VERSION = "2.2.64"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -691,6 +691,8 @@ _calib_state          = {"active": False}
 _refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
 _reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
 _signs_filter          = [""]    # Current search filter for signs page
+_signs_show_all        = [False] # Whether to show full unfiltered list
+_api_error             = [""]    # Non-empty = API error message, stops fetching until cleared
 _signs_page            = [0]     # Current page number for signs page
 _signs_show_all        = [False] # Whether to show full unfiltered list
 
@@ -1227,6 +1229,13 @@ if HAS_HTTPSERVER and pool is not None:
                 html_head("Matrix Portal S3 - Settings") +
                 "<body>" + html_nav("settings") +
                 "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                (
+                "<div class=\"card\" style=\"border:2px solid #ff0000\">"
+                "<p class=\"status-err\">&#x26A0; API ERROR: " + _api_error[0].replace("\n"," ") + " — "
+                "Update the API URL or API Key below and save to resume.</p>"
+                "</div>"
+                if _api_error[0] else ""
+                ) +
 
                 # Reboot
                 "<div class=\"card\"><h2>System</h2>"
@@ -1343,6 +1352,10 @@ if HAS_HTTPSERVER and pool is not None:
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
                 settings["depth"]                = new_depth
+                # Clear API error flag if URL or key changed
+                if new_api_url != settings.get("api_url","") or new_api_key != settings.get("api_key",""):
+                    _api_error[0] = ""
+                    print("API URL/key changed — clearing error flag, fetching will resume.")
                 settings["api_url"]              = new_api_url
                 settings["api_key"]              = new_api_key
                 settings["color_order"]          = new_order
@@ -2137,6 +2150,13 @@ while True:
             safe_delay(10)
             continue
 
+    # Check for API error flag — stop fetching until URL/key is fixed or rebooted
+    if _api_error[0]:
+        matrixportal.set_text_color(COLOR_RED, 0)
+        matrixportal.set_text(center_multiline_string(_api_error[0], characters_per_line), 0)
+        safe_delay(cycle_sleep_secs)
+        continue
+
     # Fetch NY511 API data
     print("Fetching NY511 API data...")
     response = None
@@ -2155,6 +2175,34 @@ while True:
         for _ in range(5):
             poll_server()
         gc.collect()
+
+        if response.status_code == 401 or response.status_code == 403:
+            # Bad API key — set error flag and stop fetching
+            _api_error[0] = "BAD\nAPI KEY"
+            print(f"API rejected key: HTTP {response.status_code}. Stopping fetches.")
+            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+            safe_delay(cycle_sleep_secs)
+            continue
+
+        if response.status_code == 404:
+            # Bad URL
+            _api_error[0] = "BAD\nAPI URL"
+            print(f"API URL not found: HTTP 404. Stopping fetches.")
+            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+            safe_delay(cycle_sleep_secs)
+            continue
 
         if response.status_code == 200:
             print("API fetch successful. Parsing JSON...")
