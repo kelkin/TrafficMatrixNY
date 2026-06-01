@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.57"
+LOCAL_VERSION = "2.2.58"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -189,9 +189,15 @@ except ImportError:
 
 # NY511 API URL — only the key comes from secrets, everything else is static
 # API URL and key — read from settings.json first, fall back to secrets.py
-# This allows customers to configure via web UI without needing Thonny
+# On first boot, migrate ny511key from secrets.py into settings.json
 _api_url = settings.get("api_url", "https://511ny.org/api/getmessagesigns?format=json&key=")
-_api_key = settings.get("api_key", "") or secrets.get("ny511key", "")
+_api_key = settings.get("api_key", "")
+if not _api_key and secrets.get("ny511key", ""):
+    # Migrate from secrets.py to settings.json on first boot
+    _api_key = secrets.get("ny511key", "")
+    settings["api_key"] = _api_key
+    save_settings(settings)
+    print("Migrated ny511key from secrets.py to settings.json")
 NY511_URL = _api_url + _api_key
 
 # OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
