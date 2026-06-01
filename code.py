@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.60"
+LOCAL_VERSION = "2.2.61"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -751,8 +751,12 @@ requests = None
 if connect_wifi():
     pool = socketpool.SocketPool(wifi.radio)
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False  # Disable cert verification — not needed for this use case
-    ssl_context.verify_mode = ssl.CERT_NONE
+    try:
+        # Disable certificate verification — CircuitPython compatible method
+        # CERT_NONE is not supported; loading empty cadata clears the CA bundle
+        ssl_context.load_verify_locations(cadata="")
+    except Exception:
+        pass  # If it fails just use default context
     requests = adafruit_requests.Session(pool, ssl_context)
 
     if not HAS_HTTPSERVER:
@@ -2089,8 +2093,10 @@ while True:
     if cycles > 1 and pool is not None:
         try:
             ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+            try:
+                ssl_context.load_verify_locations(cadata="")
+            except Exception:
+                pass
             requests = adafruit_requests.Session(pool, ssl_context)
             gc.collect()
         except Exception as _sess_err:
