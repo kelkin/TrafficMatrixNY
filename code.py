@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.64"
+LOCAL_VERSION = "2.2.65"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1328,6 +1328,12 @@ if HAS_HTTPSERVER and pool is not None:
                     new_order = "RGB"
                 new_api_url = p.get("api_url", settings.get("api_url", "")).strip()
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
+                # URL-decode percent-encoded characters from form submission
+                for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
+                                   ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
+                                   ("%20"," "),("%25","%")]:
+                    new_api_url = new_api_url.replace(code, char).replace(code.lower(), char)
+                    new_api_key = new_api_key.replace(code, char).replace(code.lower(), char)
                 try:
                     new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
