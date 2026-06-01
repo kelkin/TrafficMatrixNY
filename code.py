@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.58"
+LOCAL_VERSION = "2.2.59"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -188,17 +188,6 @@ except ImportError:
     raise
 
 # NY511 API URL — only the key comes from secrets, everything else is static
-# API URL and key — read from settings.json first, fall back to secrets.py
-# On first boot, migrate ny511key from secrets.py into settings.json
-_api_url = settings.get("api_url", "https://511ny.org/api/getmessagesigns?format=json&key=")
-_api_key = settings.get("api_key", "")
-if not _api_key and secrets.get("ny511key", ""):
-    # Migrate from secrets.py to settings.json on first boot
-    _api_key = secrets.get("ny511key", "")
-    settings["api_key"] = _api_key
-    save_settings(settings)
-    print("Migrated ny511key from secrets.py to settings.json")
-NY511_URL = _api_url + _api_key
 
 # OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
 ENABLE_OTA   = secrets.get("enable_ota", False)
@@ -271,6 +260,17 @@ def color_for_display(hex_str):
     return hex_to_int(hex_str)
 
 settings = load_settings()
+
+# API URL and key — read from settings.json, fall back to secrets.py
+# On first boot, migrate ny511key from secrets.py into settings.json
+_api_url = settings.get("api_url", "https://511ny.org/api/getmessagesigns?format=json&key=")
+_api_key = settings.get("api_key", "")
+if not _api_key and secrets.get("ny511key", ""):
+    _api_key = secrets.get("ny511key", "")
+    settings["api_key"] = _api_key
+    save_settings(settings)
+    print("Migrated ny511key from secrets.py to settings.json")
+NY511_URL = _api_url + _api_key
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
 sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
