@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.65"
+LOCAL_VERSION = "2.2.66"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -215,6 +215,7 @@ _default_settings = {
     "log_refresh_seconds":  5,       # Log page auto-refresh interval (0=disabled)
     "api_url":              "https://511ny.org/api/getmessagesigns?format=json&key=",
     "api_key":              "",      # Set via web UI or secrets.py
+    "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE", "WALL")
 }
 
 def load_settings():
@@ -952,6 +953,30 @@ def perform_ota_check(requests_session, force=False):
 # Run OTA check at startup — use same unverified context, no cert issues ever
 perform_ota_check(requests, force=False)
 
+# --- Boot: Show API source for 2 seconds so you can tell which server this unit uses ---
+_boot_api_url = settings.get("api_url", "")
+if "511ny.org" in _boot_api_url:
+    _api_label = "API:\nNY511"
+    _api_label_color = COLOR_GREEN
+elif "workers.dev" in _boot_api_url or "cloudflare" in _boot_api_url.lower():
+    _api_label = "API:\nCLOUDFLARE"
+    _api_label_color = COLOR_CYAN
+else:
+    _api_label = "API:\nOTHER"
+    _api_label_color = COLOR_AMBER
+matrixportal.set_text_color(_api_label_color, 0)
+matrixportal.set_text(center_multiline_string(_api_label, characters_per_line), 0)
+print(f"Boot: {_api_label.replace(chr(10), ' ')}")
+time.sleep(2)
+
+# --- Boot: Show unit name for 2 seconds if configured ---
+_unit_name = settings.get("unit_name", "").strip()
+if _unit_name:
+    matrixportal.set_text_color(COLOR_YELLOW, 0)
+    matrixportal.set_text(center_multiline_string(_unit_name, characters_per_line), 0)
+    print(f"Boot: Unit name = {_unit_name}")
+    time.sleep(2)
+
 # --- Shared HTML page helpers ---
 VALID_COLOR_ORDERS = ["RGB", "RBG", "GRB", "GBR", "BRG", "BGR"]
 
@@ -1276,6 +1301,14 @@ if HAS_HTTPSERVER and pool is not None:
                 "document.getElementById('cprev_text').style.background=this.value;};</script>"
                 "</div>"
 
+                "<div class=\"row\"><label>Unit Name:</label>"
+                "<input type=\"text\" name=\"unit_name\" value=\"" +
+                settings.get("unit_name", "") +
+                "\" style=\"width:200px;background:#222;color:#eee;border:1px solid #555;"
+                "border-radius:4px;padding:5px;font-family:monospace\">"
+                "<small style=\"color:#888;margin-left:8px\">Shown on LED at boot (e.g. BEDSIDE, WALL)</small>"
+                "</div>"
+
                 "<div class=\"row\"><label>API URL:</label>"
                 "<input type=\"text\" name=\"api_url\" value=\"" +
                 settings.get("api_url","https://511ny.org/api/getmessagesigns?format=json&key=") +
@@ -1328,6 +1361,7 @@ if HAS_HTTPSERVER and pool is not None:
                     new_order = "RGB"
                 new_api_url = p.get("api_url", settings.get("api_url", "")).strip()
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
+                new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
                 # URL-decode percent-encoded characters from form submission
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
                                    ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
@@ -1364,6 +1398,7 @@ if HAS_HTTPSERVER and pool is not None:
                     print("API URL/key changed — clearing error flag, fetching will resume.")
                 settings["api_url"]              = new_api_url
                 settings["api_key"]              = new_api_key
+                settings["unit_name"]            = new_unit_name
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
