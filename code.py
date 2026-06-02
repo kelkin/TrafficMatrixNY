@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.69"
+LOCAL_VERSION = "2.2.70"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1103,6 +1103,17 @@ def _parse_color_field(post_params, key, fallback):
         v = "#" + v
     return v if len(v) == 7 else settings.get(key, fallback)
 
+def _is_too_bright(hex_color):
+    """Returns True if all three channels are above 0xC0 (75%) — near-white.
+    These colors draw too much current and are blocked to protect the PSU."""
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        return r > 0xC0 and g > 0xC0 and b > 0xC0
+    except Exception:
+        return False
+
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1333,6 +1344,10 @@ if HAS_HTTPSERVER and pool is not None:
                 "<script>document.querySelector('[name=sign_name_color]').oninput=function(){"
                 "document.getElementById('cprev_name').style.background=this.value;};</script>"
                 "</div>"
+                "<div class=\"row\"><label></label>"
+                "<small style=\"color:#ff6666\">&#x26A0;&#xFE0F; Avoid white or near-white colors "
+                "&mdash; they draw too much current and will be blocked automatically.</small>"
+                "</div>"
                 "<div class=\"row\"><label>Sign Message Color:</label>"
                 "<input type=\"color\" name=\"sign_text_color\" value=\"" + cur_color + "\">"
                 "<span class=\"color-preview\" id=\"cprev_text\" "
@@ -1414,9 +1429,12 @@ if HAS_HTTPSERVER and pool is not None:
                 # URL-decode percent-encoded characters from form submission
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
                                    ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
-                                   ("%20"," "),("%25","%")]:
-                    new_api_url = new_api_url.replace(code, char).replace(code.lower(), char)
-                    new_api_key = new_api_key.replace(code, char).replace(code.lower(), char)
+                                   ("%20"," "),("%25","%"),("%2C",","),("%28","("),
+                                   ("%29",")"),("%2D","-"),("%2E","."),("%27","'"),
+                                   ("%21","!"),("%5F","_")]:
+                    new_api_url   = new_api_url.replace(code, char).replace(code.lower(), char)
+                    new_api_key   = new_api_key.replace(code, char).replace(code.lower(), char)
+                    new_unit_name = new_unit_name.replace(code, char).replace(code.lower(), char)
                 try:
                     new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
@@ -1424,6 +1442,15 @@ if HAS_HTTPSERVER and pool is not None:
 
                 new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
                 new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
+
+                # Block near-white colors — all channels > 0xC0 draws too much current
+                color_warning = ""
+                if _is_too_bright(new_color):
+                    new_color = "#F7B500"  # fall back to amber
+                    color_warning = " Sign text color was too bright (near white) and was reset to amber to protect the power supply."
+                if _is_too_bright(new_name_color):
+                    new_name_color = "#0000FF"  # fall back to blue
+                    color_warning += " Sign name color was too bright (near white) and was reset to blue."
 
                 # Use current values as defaults so missing fields don't reset to 0
                 cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
@@ -1474,7 +1501,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
                 if ok:
-                    status = "Saved! Reboot required to apply color order or brightness change." if needs_reboot else "Saved! Settings applied."
+                    status = ("Saved! Reboot required to apply color order or brightness change." if needs_reboot else "Saved! Settings applied.") + color_warning
                     cls = "status-ok"
                 else:
                     status = "Save failed."
@@ -1871,10 +1898,10 @@ if HAS_HTTPSERVER and pool is not None:
                 # 0=dim red, 1=dim green, 2=dim blue, 3=white digit
                 bmp = displayio.Bitmap(width, height, 4)
                 pal = displayio.Palette(4)
-                pal[0] = 0x330000  # dim red   — panel 1
-                pal[1] = 0x003300  # dim green — panel 2
-                pal[2] = 0x000033  # dim blue  — panel 3
-                pal[3] = 0x555555  # dim white — digit pixels (20% brightness)
+                pal[0] = 0x0D0000  # very dim red   — panel 1 (safe current)
+                pal[1] = 0x000D00  # very dim green — panel 2 (safe current)
+                pal[2] = 0x00000D  # very dim blue  — panel 3 (safe current)
+                pal[3] = 0x0D0D0D  # very dim white — digit pixels
 
                 # Fill panel background colors
                 for y in range(height):
@@ -1904,7 +1931,7 @@ if HAS_HTTPSERVER and pool is not None:
 
             # Web UI — panels now labeled P1/P2/P3 to match numbers on display
             rows = ""
-            panels = [("P1","330000","1"),("P2","003300","2"),("P3","000033","3")]
+            panels = [("P1","0d0000","1"),("P2","000d00","2"),("P3","00000d","3")]
             for name, swatch, num in panels:
                 btns = ""
                 for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
