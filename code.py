@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.68"
+LOCAL_VERSION = "2.2.69"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -216,6 +216,7 @@ _default_settings = {
     "api_url":              "https://511ny.org/api/getmessagesigns?format=json&key=",
     "api_key":              "",      # Set via web UI or secrets.py
     "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE", "WALL")
+    "use_friendly_names":   True,    # Show alias instead of NY511 sign name on LED if set
 }
 
 def load_settings():
@@ -370,12 +371,26 @@ def load_favorite_signs():
     except Exception:
         return []
 
-def save_favorite_signs(favorites_list):
-    """Save the list of favorite sign names to signs.json atomically."""
+def load_sign_aliases():
+    """Load the friendly name aliases dict from signs.json.
+    Returns {"NY511 sign name": "Friendly name", ...}"""
+    try:
+        with open(SIGNS_FILE, "r") as f:
+            data = json.loads(f.read())
+        return data.get("aliases", {})
+    except Exception:
+        return {}
+
+def save_favorite_signs(favorites_list, aliases_dict=None):
+    """Save favorites list (and optional aliases dict) to signs.json atomically."""
     tmp = SIGNS_FILE + ".tmp"
     try:
+        # Preserve existing aliases if none supplied
+        if aliases_dict is None:
+            aliases_dict = load_sign_aliases()
+        payload = {"favorites": favorites_list, "aliases": aliases_dict}
         with open(tmp, "w") as f:
-            f.write(json.dumps({"favorites": favorites_list}))
+            f.write(json.dumps(payload))
         try:
             os.remove(SIGNS_FILE)
         except OSError:
@@ -1334,6 +1349,14 @@ if HAS_HTTPSERVER and pool is not None:
                 "<small style=\"color:#888;margin-left:8px\">Shown on LED at boot (e.g. BEDSIDE, WALL)</small>"
                 "</div>"
 
+                "<div class=\"row\"><label>Friendly Names:</label>"
+                "<input type=\"checkbox\" name=\"use_friendly_names\" value=\"1\"" +
+                (" checked" if settings.get("use_friendly_names", True) else "") +
+                "> <small style=\"color:#888\">Show alias instead of NY511 sign name on LED "
+                "(set aliases on the <a href=\"/signs-favorites\" style=\"color:#00ccff\">"
+                "Favorites</a> page)</small>"
+                "</div>"
+
                 "<div class=\"row\"><label>API URL:</label>"
                 "<input type=\"text\" name=\"api_url\" value=\"" +
                 settings.get("api_url","https://511ny.org/api/getmessagesigns?format=json&key=") +
@@ -1387,6 +1410,7 @@ if HAS_HTTPSERVER and pool is not None:
                 new_api_url = p.get("api_url", settings.get("api_url", "")).strip()
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
                 new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
+                new_use_friendly = (p.get("use_friendly_names", "0") == "1")
                 # URL-decode percent-encoded characters from form submission
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
                                    ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
@@ -1424,6 +1448,7 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["api_url"]              = new_api_url
                 settings["api_key"]              = new_api_key
                 settings["unit_name"]            = new_unit_name
+                settings["use_friendly_names"]   = new_use_friendly
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
@@ -1479,9 +1504,10 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET /signs — Traffic Signs page ───────────────────────────────
         @server.route("/signs", GET)
         def route_signs(request):
-            query  = _signs_filter[0]
-            cached = load_signs_cache()
-            favs   = set(load_favorite_signs())
+            query   = _signs_filter[0]
+            cached  = load_signs_cache()
+            favs    = set(load_favorite_signs())
+            aliases = load_sign_aliases()   # {"NY511 name": "Friendly name"}
             w.feed()
 
             # Only build the full list when there's a search filter or show_all is set.
@@ -1556,10 +1582,19 @@ if HAS_HTTPSERVER and pool is not None:
                     roadway = sign.get("roadway", "")
                     roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
                                     'margin-top:-2px">' + roadway + '</div>' if roadway else "")
+                    alias_val = aliases.get(name, "").replace('"', "&quot;")
+                    alias_input = (
+                        '<input type="text" name="alias_' + safe_name + '" value="' + alias_val + '" '
+                        'placeholder="Friendly name..." '
+                        'style="width:160px;margin-left:8px;padding:2px 6px;font-size:0.85em;'
+                        'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
+                        'font-family:monospace;" title="Friendly name shown on LED instead of NY511 name">'
+                    ) if name in favs else ""
                     items_parts.append(
                         '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
                         '<label><input type="checkbox" name="fav" value="' +
                         safe_name + '"' + checked + '> ' + safe_name + '</label>'
+                        + alias_input
                         + roadway_html + '</div>'
                     )
                 items_html = "".join(items_parts)
@@ -1726,28 +1761,42 @@ if HAS_HTTPSERVER and pool is not None:
             try:
                 body_str = request.body.decode("utf-8") if request.body else ""
                 selected = []
+                aliases_new = {}
+                pct_map = [
+                    ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
+                    ("%3A",":"),("%5B","["),("%5D","]"),("%2D","-"),
+                    ("%2E","."),("%27","'"),("%21","!"),("%40","@"),
+                    ("%23","#"),("%24","$"),("%26","&"),("%3D","="),
+                    ("%3F","?"),("%20"," "),("%25","%"),
+                    ("%2B","+"),
+                ]
+                def pct_decode(s):
+                    s = s.replace("+", " ")
+                    for code, char in pct_map:
+                        s = s.replace(code, char).replace(code.lower(), char)
+                    return s
+
                 for part in body_str.split("&"):
                     if part.startswith("fav="):
-                        name = part[4:]
-                        name = name.replace("+", " ")
-                        # Full percent-decode covering all chars used in sign names
-                        pct_map = [
-                            ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
-                            ("%3A",":"),("%5B","["),("%5D","]"),("%2D","-"),
-                            ("%2E","."),("%27","'"),("%21","!"),("%40","@"),
-                            ("%23","#"),("%24","$"),("%26","&"),("%3D","="),
-                            ("%3F","?"),("%20"," "),("%25","%"),
-                        ]
-                        for code, char in pct_map:
-                            name = name.replace(code, char).replace(
-                                code.lower(), char)
+                        name = pct_decode(part[4:])
                         if name:
                             selected.append(name)
-                ok = save_favorite_signs(selected)
+                    elif part.startswith("alias_"):
+                        # alias_<percent-encoded sign name>=<value>
+                        eq = part.find("=")
+                        if eq > 6:
+                            raw_key = pct_decode(part[6:eq])
+                            raw_val = pct_decode(part[eq+1:]).strip()
+                            if raw_key and raw_val:
+                                aliases_new[raw_key] = raw_val
+
+                ok = save_favorite_signs(selected, aliases_new)
                 favsign_list = selected  # Update live list immediately
                 status = "Saved " + str(len(selected)) + " favorite sign(s)."
+                if aliases_new:
+                    status += " " + str(len(aliases_new)) + " alias(es) saved."
                 cls = "status-ok" if ok else "status-err"
-                print(f"Favorites saved: {len(selected)} signs ok={ok}")
+                print(f"Favorites saved: {len(selected)} signs, {len(aliases_new)} aliases ok={ok}")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
@@ -2307,10 +2356,14 @@ while True:
 
                 # Extract only matching signs into a small list, then free the full dataset
                 fav_set = set(favsign_list)
+                use_friendly = settings.get("use_friendly_names", True)
+                sign_aliases = load_sign_aliases() if use_friendly else {}
                 for sign in json_data:
                     if "Name" in sign and "Messages" in sign and sign["Name"] in fav_set:
+                        ny511_name = sign["Name"]
+                        display_name = sign_aliases.get(ny511_name, ny511_name) if use_friendly else ny511_name
                         matched_signs.append({
-                            "name": sign["Name"],
+                            "name": display_name,
                             "msg": sign["Messages"]
                         })
 
