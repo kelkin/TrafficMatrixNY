@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.70"
+LOCAL_VERSION = "2.2.71"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -287,6 +287,22 @@ width               = int(settings.get("width", 192))
 height              = int(settings.get("height", 32))
 bit_depth           = int(settings.get("depth", 6))
 matrix_debug        = bool(settings.get("matrix_debug", False))
+
+# Mutable brightness container — updated live from settings, no reboot needed.
+# dim() scales any 0xRRGGBB color by the current brightness factor.
+_brightness         = [max(0.05, min(1.0, brightness))]
+
+def dim(color_int):
+    """Scale an 0xRRGGBB integer by the current brightness factor.
+    Ensures each channel stays >= 1 when brightness > 0 so the display
+    is never accidentally blanked by a rounding error."""
+    f = _brightness[0]
+    if f >= 1.0:
+        return color_int
+    r = max(1, int(((color_int >> 16) & 0xFF) * f))
+    g = max(1, int(((color_int >> 8)  & 0xFF) * f))
+    b = max(1, int(( color_int        & 0xFF) * f))
+    return (r << 16) | (g << 8) | b
 print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color[0])
       + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
       + "s cycle=" + str(cycle_sleep_secs) + "s")
@@ -299,7 +315,7 @@ def refresh_signs_cache_from_api():
     """Fetch all sign names from NY511 and save to signs_cache.json.
     Called from the main loop so watchdog feeds work correctly throughout."""
     print("Fetching NY511 sign cache...")
-    matrixportal.set_text_color(0x00FFFF, 0)
+    matrixportal.set_text_color(dim(0x00FFFF), 0)
     matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
     w.feed()
 
@@ -341,7 +357,7 @@ def refresh_signs_cache_from_api():
         ok = save_signs_cache(sign_data)
         print(f"NY511 cache: {len(sign_data)} signs saved={ok}")
 
-        matrixportal.set_text_color(0x00FF00, 0)
+        matrixportal.set_text_color(dim(0x00FF00), 0)
         matrixportal.set_text(center_multiline_string(
             "SIGNS\nCACHED", characters_per_line), 0)
         safe_delay(2)
@@ -358,7 +374,7 @@ def refresh_signs_cache_from_api():
             except Exception:
                 pass
         # Restore normal display color
-        matrixportal.set_text_color(sign_text_color[0], 0)
+        matrixportal.set_text_color(dim(sign_text_color[0]), 0)
         matrixportal.set_text("", 0)
         gc.collect()
 
@@ -452,7 +468,7 @@ matrixportal.add_text(
     text_position=(0, 15),
     scrolling=False,
     line_spacing=0.8,
-    text_color=sign_text_color[0]  # remapped for hardware color order
+    text_color=dim(sign_text_color[0])  # remapped for hardware color order
 )
 # Note: FramebufferDisplay.brightness only supports 0.0 (off) or 1.0 (full).
 # True brightness is controlled via bit_depth at initialization — see settings.
@@ -498,7 +514,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     clean_name = clean_string(match["name"])
     centered_name = center_multiline_string(clean_name, characters_per_line)
     print(f"Name: {clean_name}")
-    matrixportal.set_text_color(sign_name_color[0], 0)
+    matrixportal.set_text_color(dim(sign_name_color[0]), 0)
     matrixportal.set_text(centered_name, 0)
     safe_delay(name_secs)
     w.feed()
@@ -514,7 +530,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
         raw_messages = [str(raw_messages)]
 
     # Display each message, paginated
-    matrixportal.set_text_color(sign_text_color[0], 0)
+    matrixportal.set_text_color(dim(sign_text_color[0]), 0)
     for raw_msg in raw_messages:
         if _reboot_pending[0] or _id_flash_pending[0]:
             return  # Exit immediately if reboot or ID flash requested
@@ -738,7 +754,7 @@ def connect_wifi():
     ssid = secrets.get("ssid", "")
     print(f"Connecting to WiFi: {ssid}")
     try:
-        matrixportal.set_text_color(COLOR_CYAN, 0)
+        matrixportal.set_text_color(dim(COLOR_CYAN), 0)
         matrixportal.set_text(center_multiline_string(f"CONNECTING\n{ssid}", characters_per_line), 0)
     except Exception:
         pass
@@ -749,7 +765,7 @@ def connect_wifi():
         ip = str(wifi.radio.ipv4_address)
         print(f"Connected! IP: {ip}")
         try:
-            matrixportal.set_text_color(COLOR_GREEN, 0)
+            matrixportal.set_text_color(dim(COLOR_GREEN), 0)
             matrixportal.set_text(center_multiline_string(f"{ip}\n{ssid}", characters_per_line), 0)
             safe_delay(5)
         except Exception:
@@ -758,7 +774,7 @@ def connect_wifi():
     except Exception as e:
         print(f"WiFi connection failed: {e}")
         try:
-            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string("WIFI\nFAILED", characters_per_line), 0)
         except Exception:
             pass
@@ -787,10 +803,10 @@ if connect_wifi():
     # Show web server status on matrix
     try:
         if HAS_HTTPSERVER:
-            matrixportal.set_text_color(COLOR_GREEN, 0)
+            matrixportal.set_text_color(dim(COLOR_GREEN), 0)
             matrixportal.set_text(center_multiline_string("WEB OK\nPORT 80", characters_per_line), 0)
         else:
-            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string(f"WEB ERR\n{web_error_message}", characters_per_line), 0)
         safe_delay(3)
     except Exception:
@@ -817,7 +833,7 @@ def perform_ota_check(requests_session, force=False):
     print(f"Checking for updates... Local: {LOCAL_VERSION}")
 
     # Display local version on matrix
-    matrixportal.set_text_color(COLOR_CYAN, 0)
+    matrixportal.set_text_color(dim(COLOR_CYAN), 0)
     matrixportal.set_text(center_multiline_string(f"LOCAL\nVERSION\n{LOCAL_VERSION}", characters_per_line), 0)
     safe_delay(2)
 
@@ -867,13 +883,13 @@ def perform_ota_check(requests_session, force=False):
         print(f"Remote version: {remote_version}")
 
         # Display remote version on matrix
-        matrixportal.set_text_color(COLOR_YELLOW, 0)
+        matrixportal.set_text_color(dim(COLOR_YELLOW), 0)
         matrixportal.set_text(center_multiline_string(f"CLOUD\nVERSION\n{remote_version}", characters_per_line), 0)
         safe_delay(2)
 
         if remote_version == LOCAL_VERSION and not force:
             print("Firmware is up to date!")
-            matrixportal.set_text_color(COLOR_GREEN, 0)
+            matrixportal.set_text_color(dim(COLOR_GREEN), 0)
             matrixportal.set_text(center_multiline_string("VERSION\nVERIFIED\nUP TO DATE", characters_per_line), 0)
             safe_delay(2)
             return
@@ -881,7 +897,7 @@ def perform_ota_check(requests_session, force=False):
         # New version — download all files to .tmp paths first, then swap atomically
         print(f"Update available: {LOCAL_VERSION} -> {remote_version}")
         print(f"Downloading {len(files_to_download)} file(s)...")
-        matrixportal.set_text_color(0x00FF00, 0)  # Green
+        matrixportal.set_text_color(dim(0x00FF00), 0)  # Green
         matrixportal.set_text(center_multiline_string("DOWNLOADING\nFILES...", characters_per_line), 0)
 
         successful_swaps = []  # List of (temp_path, final_path) tuples
@@ -924,7 +940,7 @@ def perform_ota_check(requests_session, force=False):
             except OSError as fs_err:
                 print(f"    Write error for {local_path}: {fs_err}")
                 if local_path == "code.py":
-                    matrixportal.set_text_color(0xFF0000, 0)  # Red
+                    matrixportal.set_text_color(dim(0xFF0000), 0)  # Red
                     matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line), 0)
                     safe_delay(5)
                     return
@@ -953,7 +969,7 @@ def perform_ota_check(requests_session, force=False):
             print(f"    Installed: {final_path}")
 
         print("Update complete! Rebooting...")
-        matrixportal.set_text_color(0x00FF00, 0)  # Green
+        matrixportal.set_text_color(dim(0x00FF00), 0)  # Green
         matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW:{remote_version}", characters_per_line), 0)
         safe_delay(4)
         microcontroller.reset()
@@ -983,7 +999,7 @@ elif "workers.dev" in _boot_api_url or "cloudflare" in _boot_api_url.lower():
 else:
     _api_label = "API:\nOTHER"
     _api_label_color = COLOR_AMBER
-matrixportal.set_text_color(_api_label_color, 0)
+matrixportal.set_text_color(dim(_api_label_color), 0)
 matrixportal.set_text(center_multiline_string(_api_label, characters_per_line), 0)
 print(f"Boot: {_api_label.replace(chr(10), ' ')}")
 time.sleep(2)
@@ -991,7 +1007,7 @@ time.sleep(2)
 # --- Boot: Show unit name for 2 seconds if configured ---
 _unit_name = settings.get("unit_name", "").strip()
 if _unit_name:
-    matrixportal.set_text_color(COLOR_YELLOW, 0)
+    matrixportal.set_text_color(dim(COLOR_YELLOW), 0)
     matrixportal.set_text(center_multiline_string(_unit_name, characters_per_line), 0)
     print(f"Boot: Unit name = {_unit_name}")
     time.sleep(2)
@@ -1172,7 +1188,7 @@ if HAS_HTTPSERVER and pool is not None:
                 order = "RGB"
             try:
                 # Show raw yellow (#FFFF00) without any remapping
-                matrixportal.set_text_color(0xFFFF00, 0)
+                matrixportal.set_text_color(dim(0xFFFF00), 0)
                 matrixportal.set_text(center_multiline_string(
                     "ORDER\n" + order + "\nYELLOW?", characters_per_line), 0)
                 print(f"Color test: showing raw #FFFF00 with order={order}")
@@ -1243,7 +1259,7 @@ if HAS_HTTPSERVER and pool is not None:
         def route_reboot(request):
             print("Reboot requested via web UI.")
             try:
-                matrixportal.set_text_color(COLOR_AMBER, 0)
+                matrixportal.set_text_color(dim(COLOR_AMBER), 0)
                 matrixportal.set_text(center_multiline_string("REBOOT\nPENDING", characters_per_line), 0)
             except Exception:
                 pass
@@ -1324,15 +1340,15 @@ if HAS_HTTPSERVER and pool is not None:
                 "<form method=\"POST\" action=\"/save-settings\">"
 
                 "<div class=\"row\"><label>Brightness:</label>"
-                "<select name=\"depth\">"
-                + "".join('<option value="' + str(d) + '"' +
-                          (' selected' if int(settings.get("depth", 6)) == d else '') +
-                          '>' + {1:"1 - Very Dim", 2:"2 - Dim", 3:"3 - Medium",
-                                 4:"4 - Bright", 5:"5 - Very Bright",
-                                 6:"6 - Maximum"}[d] + '</option>'
-                          for d in range(1, 7)) +
+                "<select name=\"brightness\">"
+                + "".join(
+                    '<option value="' + str(round(v/100, 2)) + '"' +
+                    (' selected' if abs(float(settings.get("brightness", 0.8)) - v/100) < 0.06 else '') +
+                    '>' + str(v) + '%</option>'
+                    for v in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                ) +
                 "</select>"
-                "<small style=\"color:#888;margin-left:8px\">(requires reboot)</small>"
+                "<small style=\"color:#888;margin-left:8px\">Applied immediately, no reboot needed</small>"
                 "</div>"
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
@@ -1483,6 +1499,11 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["msg_display_seconds"]   = new_msg_secs
                 settings["page_display_seconds"]  = new_page_secs
                 settings["cycle_sleep_seconds"]   = new_cycle_secs
+                try:
+                    new_brightness = max(0.05, min(1.0, float(p.get("brightness", settings.get("brightness", 0.8)))))
+                except Exception:
+                    new_brightness = float(settings.get("brightness", 0.8))
+                settings["brightness"] = new_brightness
 
                 ok = save_settings(settings)
 
@@ -1493,20 +1514,20 @@ if HAS_HTTPSERVER and pool is not None:
                 cycle_sleep_secs = new_cycle_secs
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
-                matrixportal.set_text_color(sign_text_color[0], 0)
+                _brightness[0] = new_brightness  # Live brightness update — no reboot needed
+                matrixportal.set_text_color(dim(sign_text_color[0]), 0)
                 # Rebuild NY511_URL with new api_url/api_key if changed
                 global NY511_URL
                 NY511_URL = new_api_url + new_api_key
-                # brightness requires reboot to apply (bit_depth change)
 
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
                 if ok:
-                    status = ("Saved! Reboot required to apply color order or brightness change." if needs_reboot else "Saved! Settings applied.") + color_warning
+                    status = ("Saved! Reboot required to apply color order change." if needs_reboot else "Saved! Settings applied.") + color_warning
                     cls = "status-ok"
                 else:
                     status = "Save failed."
                     cls = "status-err"
-                print("Settings saved: order=" + new_order
+                print("Settings saved: order=\" + new_order
                       + " msg_color=" + new_color + " name_color=" + new_name_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
                       + "s cycle=" + str(new_cycle_secs) + "s")
@@ -2135,7 +2156,7 @@ if HAS_HTTPSERVER and pool is not None:
                               headers={"Connection":"close"}, body=body)
 
             print(f"Sync requested from {source_ip} settings={do_settings} signs={do_signs}")
-            matrixportal.set_text_color(0x00FFFF, 0)
+            matrixportal.set_text_color(dim(0x00FFFF), 0)
             matrixportal.set_text(center_multiline_string("SYNCING\nFROM\n" + source_ip, characters_per_line), 0)
             w.feed()
 
@@ -2165,7 +2186,7 @@ if HAS_HTTPSERVER and pool is not None:
                         settings.update(loaded)
                         sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
                         sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
-                        matrixportal.set_text_color(sign_text_color[0], 0)
+                        matrixportal.set_text_color(dim(sign_text_color[0]), 0)
                         status_lines.append("&#x2713; settings.json synced")
                     else:
                         status_lines.append("&#x2717; settings.json save failed")
@@ -2198,7 +2219,7 @@ if HAS_HTTPSERVER and pool is not None:
                         pass
                 gc.collect()
 
-            matrixportal.set_text_color(sign_text_color[0], 0)
+            matrixportal.set_text_color(dim(sign_text_color[0]), 0)
             matrixportal.set_text("", 0)
 
             status_html = "<br>".join(status_lines)
@@ -2293,7 +2314,7 @@ while True:
                         COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED]
         for fc in flash_colors:
             w.feed()
-            matrixportal.set_text_color(fc, 0)
+            matrixportal.set_text_color(dim(fc), 0)
             matrixportal.set_text(center_multiline_string(unit_label, characters_per_line), 0)
             time.sleep(0.4)
         # Restore display to blank so main loop resumes normally
@@ -2310,7 +2331,7 @@ while True:
 
     # Check for API error flag — stop fetching until URL/key is fixed or rebooted
     if _api_error[0]:
-        matrixportal.set_text_color(COLOR_RED, 0)
+        matrixportal.set_text_color(dim(COLOR_RED), 0)
         matrixportal.set_text(center_multiline_string(_api_error[0], characters_per_line), 0)
         safe_delay(cycle_sleep_secs)
         continue
@@ -2338,7 +2359,7 @@ while True:
             # Bad API key — set error flag and stop fetching
             _api_error[0] = "BAD\nAPI KEY"
             print(f"API rejected key: HTTP {response.status_code}. Stopping fetches.")
-            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
             try:
                 response.close()
@@ -2352,7 +2373,7 @@ while True:
             # Bad URL
             _api_error[0] = "BAD\nAPI URL"
             print(f"API URL not found: HTTP 404. Stopping fetches.")
-            matrixportal.set_text_color(COLOR_RED, 0)
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
             try:
                 response.close()
