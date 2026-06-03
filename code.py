@@ -287,15 +287,18 @@ width               = int(settings.get("width", 192))
 height              = int(settings.get("height", 32))
 bit_depth           = int(settings.get("depth", 6))
 matrix_debug        = bool(settings.get("matrix_debug", False))
+print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color[0])
+      + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
+      + "s cycle=" + str(cycle_sleep_secs) + "s")
 
 # Mutable brightness container — updated live from settings, no reboot needed.
-# dim() scales any 0xRRGGBB color by the current brightness factor.
-_brightness         = [max(0.05, min(1.0, brightness))]
+# dim() scales any 0xRRGGBB integer by the current brightness factor.
+_brightness = [max(0.05, min(1.0, brightness))]
 
 def dim(color_int):
     """Scale an 0xRRGGBB integer by the current brightness factor.
-    Ensures each channel stays >= 1 when brightness > 0 so the display
-    is never accidentally blanked by a rounding error."""
+    Returns color unchanged at 100%. Ensures each channel is at
+    least 1 so display is never accidentally blanked by rounding."""
     f = _brightness[0]
     if f >= 1.0:
         return color_int
@@ -303,9 +306,6 @@ def dim(color_int):
     g = max(1, int(((color_int >> 8)  & 0xFF) * f))
     b = max(1, int(( color_int        & 0xFF) * f))
     return (r << 16) | (g << 8) | b
-print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color[0])
-      + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
-      + "s cycle=" + str(cycle_sleep_secs) + "s")
 
 # --- signs.json — favorite sign names (replaces sign_list.txt) ---
 SIGNS_FILE       = "signs.json"
@@ -1503,7 +1503,7 @@ if HAS_HTTPSERVER and pool is not None:
                     new_brightness = max(0.05, min(1.0, float(p.get("brightness", settings.get("brightness", 0.8)))))
                 except Exception:
                     new_brightness = float(settings.get("brightness", 0.8))
-                settings["brightness"] = new_brightness
+                settings["brightness"]            = new_brightness
 
                 ok = save_settings(settings)
 
@@ -1514,7 +1514,7 @@ if HAS_HTTPSERVER and pool is not None:
                 cycle_sleep_secs = new_cycle_secs
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
-                _brightness[0] = new_brightness  # Live brightness update — no reboot needed
+                _brightness[0]   = new_brightness  # Live — no reboot needed
                 matrixportal.set_text_color(dim(sign_text_color[0]), 0)
                 # Rebuild NY511_URL with new api_url/api_key if changed
                 global NY511_URL
@@ -1527,7 +1527,7 @@ if HAS_HTTPSERVER and pool is not None:
                 else:
                     status = "Save failed."
                     cls = "status-err"
-                print("Settings saved: order=\" + new_order
+                print("Settings saved: order=" + new_order
                       + " msg_color=" + new_color + " name_color=" + new_name_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
                       + "s cycle=" + str(new_cycle_secs) + "s")
@@ -2451,4 +2451,3 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
-
