@@ -1,5 +1,5 @@
 {
-  "version": "2.2.70",
+  "version": "2.2.71",
   "files": {
     "code.py": "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/code.py",
     "lib/adafruit_logging.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_Logging/main/adafruit_logging.py",
