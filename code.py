@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.72"
+LOCAL_VERSION = "2.2.73"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1446,11 +1446,9 @@ if HAS_HTTPSERVER and pool is not None:
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
                 new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
                 new_use_friendly = (p.get("use_friendly_names", "0") == "1")
-                # URL-decode: replace + with space first, then percent-decode
-                new_unit_name = new_unit_name.replace("+", " ")
                 # URL-decode percent-encoded characters from form submission
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
-                                   ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
+                                   ("%26","&"),("%23","#"),("%40","@"),("%2B"," "),
                                    ("%20"," "),("%25","%"),("%2C",","),("%28","("),
                                    ("%29",")"),("%2D","-"),("%2E","."),("%27","'"),
                                    ("%21","!"),("%5F","_")]:
@@ -1512,7 +1510,9 @@ if HAS_HTTPSERVER and pool is not None:
                     if raw_b > 1.0:  # came in as percentage integer
                         raw_b = raw_b / 100.0
                     new_brightness = max(0.05, min(1.0, raw_b))
-                except Exception:
+                    print(f"Brightness: raw={p.get('brightness')} parsed={new_brightness}")
+                except Exception as be:
+                    print(f"Brightness parse error: {be}")
                     new_brightness = float(settings.get("brightness", 0.8))
                 settings["brightness"]            = new_brightness
 
@@ -1526,6 +1526,7 @@ if HAS_HTTPSERVER and pool is not None:
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
                 _brightness[0]   = new_brightness  # Live — no reboot needed
+                print(f"Brightness applied: _brightness={_brightness[0]} dim(yellow)={hex(dim(0xFFFF00))}")
                 matrixportal.set_text_color(dim(sign_text_color[0]), 0)
                 # Rebuild NY511_URL with new api_url/api_key if changed
                 global NY511_URL
