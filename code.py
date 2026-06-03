@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.71"
+LOCAL_VERSION = "2.2.72"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -297,14 +297,18 @@ _brightness = [max(0.05, min(1.0, brightness))]
 
 def dim(color_int):
     """Scale an 0xRRGGBB integer by the current brightness factor.
-    Returns color unchanged at 100%. Ensures each channel is at
-    least 1 so display is never accidentally blanked by rounding."""
+    Returns color unchanged at 100%. At lower brightness, each non-zero
+    channel is clamped to a minimum of 16 (0x10) so the display stays
+    visible — the MatrixPortal needs at least this to drive the panels."""
     f = _brightness[0]
     if f >= 1.0:
         return color_int
-    r = max(1, int(((color_int >> 16) & 0xFF) * f))
-    g = max(1, int(((color_int >> 8)  & 0xFF) * f))
-    b = max(1, int(( color_int        & 0xFF) * f))
+    r_in = (color_int >> 16) & 0xFF
+    g_in = (color_int >> 8)  & 0xFF
+    b_in =  color_int        & 0xFF
+    r = (max(16, int(r_in * f)) if r_in > 0 else 0)
+    g = (max(16, int(g_in * f)) if g_in > 0 else 0)
+    b = (max(16, int(b_in * f)) if b_in > 0 else 0)
     return (r << 16) | (g << 8) | b
 
 # --- signs.json — favorite sign names (replaces sign_list.txt) ---
@@ -1342,8 +1346,8 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"row\"><label>Brightness:</label>"
                 "<select name=\"brightness\">"
                 + "".join(
-                    '<option value="' + str(round(v/100, 2)) + '"' +
-                    (' selected' if abs(float(settings.get("brightness", 0.8)) - v/100) < 0.06 else '') +
+                    '<option value="' + str(v) + '"' +
+                    (' selected' if abs(float(settings.get("brightness", 0.8)) - v/100) < 0.04 else '') +
                     '>' + str(v) + '%</option>'
                     for v in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 ) +
@@ -1442,6 +1446,8 @@ if HAS_HTTPSERVER and pool is not None:
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
                 new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
                 new_use_friendly = (p.get("use_friendly_names", "0") == "1")
+                # URL-decode: replace + with space first, then percent-decode
+                new_unit_name = new_unit_name.replace("+", " ")
                 # URL-decode percent-encoded characters from form submission
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
                                    ("%26","&"),("%23","#"),("%40","@"),("%2B","+"),
@@ -1500,7 +1506,12 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["page_display_seconds"]  = new_page_secs
                 settings["cycle_sleep_seconds"]   = new_cycle_secs
                 try:
-                    new_brightness = max(0.05, min(1.0, float(p.get("brightness", settings.get("brightness", 0.8)))))
+                    raw_b = p.get("brightness", settings.get("brightness", 0.8))
+                    # Dropdown sends integer percentages like "80"; settings stores floats like 0.8
+                    raw_b = float(raw_b)
+                    if raw_b > 1.0:  # came in as percentage integer
+                        raw_b = raw_b / 100.0
+                    new_brightness = max(0.05, min(1.0, raw_b))
                 except Exception:
                     new_brightness = float(settings.get("brightness", 0.8))
                 settings["brightness"]            = new_brightness
@@ -2451,3 +2462,4 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
+
