@@ -45,7 +45,7 @@ Bugfixes vs. earlier revisions:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.73"
+LOCAL_VERSION = "2.2.74"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 # The color_order setting passed to MatrixPortal handles channel mapping at the
@@ -1354,6 +1354,20 @@ if HAS_HTTPSERVER and pool is not None:
                 "</select>"
                 "<small style=\"color:#888;margin-left:8px\">Applied immediately, no reboot needed</small>"
                 "</div>"
+
+                "<div class=\"row\"><label>Scan Quality:</label>"
+                "<select name=\"depth\">"
+                + "".join(
+                    '<option value="' + str(d) + '"' +
+                    (' selected' if int(settings.get("depth", 6)) == d else '') +
+                    '>' + {4:"4 - Max Stability", 5:"5 - Balanced", 6:"6 - Max Quality"}[d] + '</option>'
+                    for d in [4, 5, 6]
+                ) +
+                "</select>"
+                "<small style=\"color:#888;margin-left:8px\">Lower = less display glitching, higher = better color depth "
+                "(requires reboot)</small>"
+                "</div>"
+
                 "<div class=\"row\"><label>Color Order:</label>"
                 "<select name=\"color_order\">" + order_opts + "</select></div>"
 
@@ -1534,7 +1548,7 @@ if HAS_HTTPSERVER and pool is not None:
 
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
                 if ok:
-                    status = ("Saved! Reboot required to apply color order change." if needs_reboot else "Saved! Settings applied.") + color_warning
+                    status = ("Saved! Reboot required to apply color order or scan quality change." if needs_reboot else "Saved! Settings applied.") + color_warning
                     cls = "status-ok"
                 else:
                     status = "Save failed."
@@ -2463,4 +2477,3 @@ while True:
 
     print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
     safe_delay(cycle_sleep_secs)
-
