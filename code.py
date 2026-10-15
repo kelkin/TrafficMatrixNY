@@ -1532,4 +1532,899 @@ if HAS_HTTPSERVER and pool is not None:
                 else:
                     status = "Save failed."
                     cls = "status-err"
-                print("Settings saved: order=" +
+                print("Settings saved: order=" + new_order
+                      + " msg_color=" + new_color + " name_color=" + new_name_color
+                      + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
+                      + "s cycle=" + str(new_cycle_secs) + "s"
+                      + " show_ts=" + str(new_show_ts) + " override_dwell=" + str(new_override_dwell))
+            except Exception as e:
+                status = "Error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+
+            body = (
+                html_head("Settings Saved") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
+                + ("&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                   "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
+                   "</form>" if needs_reboot else "") +
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /signs — Traffic Signs page ───────────────────────────────
+        @server.route("/signs", GET)
+        def route_signs(request):
+            query   = _signs_filter[0]
+            cached  = load_signs_cache()
+            favs    = set(load_favorite_signs())   # set of IDs
+            aliases = load_sign_aliases()          # {id: friendly}
+            w.feed()
+
+            if query == "__favorites__":
+                all_items = sorted([s for s in cached if s["id"] in favs],
+                                   key=lambda s: s["name"])
+            elif query.startswith("__roadway__:"):
+                rw = query[12:]
+                all_items = sorted([s for s in cached
+                                    if s.get("roadway","").lower() == rw.lower()],
+                                   key=lambda s: s["name"])
+            elif query:
+                all_items = [s for s in cached if
+                             query in s["name"].lower() or
+                             query in s.get("roadway", "").lower()]
+            else:
+                all_items = None
+            w.feed()
+
+            if all_items is None:
+                items_html = ""
+                sign_count_text = str(len(cached)) + " signs cached."
+                fav_count = len([s for s in cached if s["id"] in favs])
+
+                roadways = sorted(set(
+                    s.get("roadway","").strip()
+                    for s in cached
+                    if s.get("roadway","").strip()
+                ))
+                w.feed()
+
+                rw_items = "".join(
+                    '<div class="sign-item">'
+                    '<a href="/signs-roadway/' +
+                    rw.replace(" ","+").replace("/","%2F").replace("&","%26") +
+                    '" style="color:#eee;text-decoration:none">'
+                    '&#x1F6A6; ' + rw + '</a>'
+                    '</div>'
+                    for rw in roadways
+                )
+                w.feed()
+
+                list_section = (
+                    '<p style="color:#aaa">You have '
+                    '<strong style="color:#F7B500">' + str(fav_count) + ' favorites</strong> saved. '
+                    'Search by name/roadway above, browse by roadway below, '
+                    'or view your favorites.</p>'
+                    '<a href="/signs-favorites"><button class="btn-cyan">&#x2B50; My Favorites</button></a>'
+                    '<br><br>'
+                    '<div style="color:#ffaa00;font-weight:bold;margin-bottom:8px">'
+                    '&#x1F6A6; Browse by Roadway</div>'
+                    '<div class="sign-list">' + rw_items + '</div>'
+                )
+                breadcrumb = ""
+            else:
+                items_parts = []
+                for i, sign in enumerate(all_items):
+                    if i % 50 == 0:
+                        w.feed()
+                    sid  = sign["id"]
+                    name = sign["name"]
+                    checked = " checked" if sid in favs else ""
+                    fav_cls = " fav" if sid in favs else ""
+                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
+                                     .replace(">","&gt;").replace('"',"&quot;"))
+                    safe_id = (sid.replace("&","&amp;").replace("<","&lt;")
+                                   .replace(">","&gt;").replace('"',"&quot;"))
+                    roadway = sign.get("roadway", "")
+                    roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
+                                    'margin-top:-2px">' + roadway + '</div>' if roadway else "")
+                    alias_val = aliases.get(sid, "").replace('"', "&quot;")
+                    alias_input = (
+                        '<input type="text" name="alias_' + safe_id + '" value="' + alias_val + '" '
+                        'placeholder="Friendly name..." '
+                        'style="width:160px;margin-left:8px;padding:2px 6px;font-size:0.85em;'
+                        'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
+                        'font-family:monospace;" title="Friendly name shown on LED instead of the sign name">'
+                    ) if sid in favs else ""
+                    items_parts.append(
+                        '<div class="sign-item' + fav_cls + '">'
+                        '<label><input type="checkbox" name="fav" value="' +
+                        safe_id + '"' + checked + '> ' + safe_name + '</label>'
+                        + alias_input
+                        + roadway_html + '</div>'
+                    )
+                items_html = "".join(items_parts)
+                items_parts = None
+                w.feed()
+                gc.collect()
+                if query.startswith("__roadway__:"):
+                    sign_count_text = (str(len(all_items)) + " signs on " +
+                                      query[12:] + ".")
+                elif query == "__favorites__":
+                    sign_count_text = str(len(all_items)) + " favorite signs."
+                else:
+                    sign_count_text = str(len(all_items)) + " signs shown."
+
+                crumb_base = '<a href="/signs" style="color:#00ccff">&#x1F6A6; Traffic Signs</a>'
+                if query.startswith("__roadway__:"):
+                    rw_name = query[12:]
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">' + rw_name + '</span>'
+                        '</div>'
+                    )
+                elif query == "__favorites__":
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">&#x2B50; My Favorites</span>'
+                        '</div>'
+                    )
+                elif query:
+                    breadcrumb = (
+                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
+                        'border-bottom:1px solid #222">'
+                        + crumb_base +
+                        ' <span style="color:#555">&rsaquo;</span> '
+                        '<span style="color:#ffaa00">Search: &ldquo;' + query + '&rdquo;</span>'
+                        '</div>'
+                    )
+                else:
+                    breadcrumb = ""
+                list_section = (
+                    breadcrumb +
+                    '<form method="POST" action="/save-signs">'
+                    '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
+                    '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
+                    '</form>'
+                )
+
+            body = (
+                html_head("Traffic Signs") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                '<div class="card">'
+                '<form method="POST" action="/refresh-signs-cache" style="display:inline">'
+                '<button class="btn-cyan" type="submit">&#x1F504; Refresh from 511NY</button>'
+                '</form>'
+                '<span style="color:#888;margin-left:15px;font-size:0.9em">'
+                'Fetches all signs. Takes up to 90 seconds.</span>'
+                '</div>'
+                '<div class="card">' +
+                ('<p style="color:#aaa">' + sign_count_text +
+                 ' Favorites in <span style="color:#F7B500">yellow</span>.</p>'
+                 if cached else
+                 '<p style="color:#aaa">No sign cache. Click Refresh to load from 511NY.</p>') +
+                '<form method="POST" action="/signs-search">'
+                '<input type="text" name="q" value="' + (query if not query.startswith("__") else "") + '" '
+                'placeholder="Search by sign name or roadway..." autocomplete="off" '
+                'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
+                'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
+                '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
+                ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
+                '</form><br>'
+                + (('<div style="margin-bottom:8px">'
+                '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
+                ' <button class="btn-gray" type="button" onclick="deselectAll()">&#x2610; Deselect All</button>'
+                '</div>'
+                '<script>'
+                'function selectAll(){'
+                'document.querySelectorAll("#signlist input[type=checkbox]")'
+                '.forEach(function(b){b.checked=true;});}'
+                'function deselectAll(){'
+                'document.querySelectorAll("#signlist input[type=checkbox]")'
+                '.forEach(function(b){b.checked=false;});}'
+                '</script>') if all_items is not None else "") +
+                list_section +
+                '</div></body></html>'
+            )
+            w.feed()
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /signs-clear ──────────────────────────────────────────────
+        @server.route("/signs-clear", GET)
+        def route_signs_clear(request):
+            _signs_filter[0] = ""
+            _signs_show_all[0] = False
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── GET /signs-roadway/<rw> ───────────────────────────────────────
+        @server.route("/signs-roadway/<rw>", GET)
+        def route_signs_roadway(request, rw):
+            roadway = rw.replace("+", " ")
+            for code, char in [("%2F","/"),("%26","&"),("%2D","-"),
+                                ("%28","("),("%29",")"),("%2C",",")]:
+                roadway = roadway.replace(code, char).replace(code.lower(), char)
+            _signs_filter[0] = "__roadway__:" + roadway
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── GET /signs-favorites ──────────────────────────────────────────
+        @server.route("/signs-favorites", GET)
+        def route_signs_favorites(request):
+            _signs_filter[0]   = "__favorites__"
+            _signs_show_all[0] = False
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── POST /signs-search ────────────────────────────────────────────
+        @server.route("/signs-search", "POST")
+        def route_signs_search(request):
+            p = parse_post_body(request)
+            q = p.get("q", "").strip().lower()
+            _signs_filter[0]   = q
+            return Response(request, status=(303, "See Other"),
+                          headers={"Location": "/signs", "Connection": "close"},
+                          body="")
+
+        # ── POST /refresh-signs-cache ─────────────────────────────────────
+        @server.route("/refresh-signs-cache", "POST")
+        def route_refresh_cache(request):
+            _refresh_cache_pending[0] = True
+            print("Sign cache refresh queued — will run on next main loop cycle.")
+            body = (
+                html_head("Refreshing Signs...") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from 511NY...</p>"
+                "<p style=\"color:#aaa\">This takes up to 90 seconds. "
+                "The page will redirect automatically when done.</p>"
+                "<script>setTimeout(function(){window.location='/signs'},95000);</script>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── POST /save-signs ──────────────────────────────────────────────
+        @server.route("/save-signs", "POST")
+        def route_save_signs(request):
+            global favsign_list
+            try:
+                body_str = request.body.decode("utf-8") if request.body else ""
+                selected = []
+                aliases_new = {}
+                pct_map = [
+                    ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
+                    ("%3A",":"),("%5B","["),("%5D","]"),("%2D","-"),
+                    ("%2E","."),("%27","'"),("%21","!"),("%40","@"),
+                    ("%23","#"),("%24","$"),("%26","&"),("%3D","="),
+                    ("%3F","?"),("%20"," "),("%25","%"),("%2A","*"),
+                    ("%2B","+"),
+                ]
+                def pct_decode(s):
+                    s = s.replace("+", " ")
+                    for code, char in pct_map:
+                        s = s.replace(code, char).replace(code.lower(), char)
+                    return s
+
+                for part in body_str.split("&"):
+                    if part.startswith("fav="):
+                        sid = pct_decode(part[4:])
+                        if sid:
+                            selected.append(sid)
+                    elif part.startswith("alias_"):
+                        eq = part.find("=")
+                        if eq > 6:
+                            raw_key = pct_decode(part[6:eq])
+                            raw_val = pct_decode(part[eq+1:]).strip()
+                            if raw_key and raw_val:
+                                aliases_new[raw_key] = raw_val
+
+                ok = save_favorite_signs(selected, aliases_new)
+                favsign_list = selected
+                status = "Saved " + str(len(selected)) + " favorite sign(s)."
+                if aliases_new:
+                    status += " " + str(len(aliases_new)) + " alias(es) saved."
+                cls = "status-ok" if ok else "status-err"
+                print(f"Favorites saved: {len(selected)} signs, {len(aliases_new)} aliases ok={ok}")
+            except Exception as e:
+                status = "Error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+
+            body = (
+                html_head("Signs Saved") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── POST /calibrate ───────────────────────────────────────────────
+        @server.route("/calibrate", "POST")
+        def route_calibrate(request):
+            global _calib_state
+            _calib_state["active"] = True
+
+            current_order = settings.get("color_order", "RGB")
+            calib_needs_reset = (current_order != "RGB")
+            print(f"Calibration: current color_order={current_order} needs_reset={calib_needs_reset}")
+            if calib_needs_reset:
+                settings["color_order"] = "RGB"
+                save_settings(settings)
+                print("Calibration: temporarily set color_order=RGB for accurate test.")
+                print("Board must reboot to apply — rebooting now.")
+                body = (
+                    html_head("Calibration — Rebooting...") +
+                    "<body>" + html_nav("settings") +
+                    "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
+                    "<div class=\"card\">"
+                    "<p style=\"color:#ffaa00\"><strong>Rebooting with neutral color order...</strong></p>"
+                    "<p style=\"color:#aaa\">The board is restarting. This page will automatically "
+                    "redirect to calibration when the board is back online.</p>"
+                    "<p id=\"status\" style=\"color:#888\">&#x23F3; Waiting for board...</p>"
+                    "<script>"
+                    "function tryReconnect(){"
+                    "  fetch('/').then(function(r){"
+                    "    if(r.ok){window.location='/settings';}"
+                    "    else{setTimeout(tryReconnect,2000);}"
+                    "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                    "}"
+                    "setTimeout(tryReconnect,6000);"
+                    "</script>"
+                    "</div></body></html>"
+                )
+                _reboot_pending[0] = True
+                return Response(request, content_type="text/html",
+                              headers={"Connection":"close"}, body=body)
+            try:
+                import displayio
+
+                DIGITS = {
+                    "1": [(2,0),(1,1),(2,1),(2,2),(2,3),(2,4),(2,5),(2,6)],
+                    "2": [(1,0),(2,0),(3,0),(0,1),(3,1),(3,2),(2,3),(1,4),(0,5),(0,6),(1,6),(2,6),(3,6)],
+                    "3": [(0,0),(1,0),(2,0),(3,0),(3,1),(3,2),(1,2),(2,2),(3,3),(3,4),(0,5),(3,5),(1,6),(2,6)],
+                }
+
+                display = matrixportal.display
+                panel_w = width // 3
+
+                bmp = displayio.Bitmap(width, height, 4)
+                pal = displayio.Palette(4)
+                pal[0] = 0x0D0000
+                pal[1] = 0x000D00
+                pal[2] = 0x00000D
+                pal[3] = 0x0D0D0D
+
+                for y in range(height):
+                    for x in range(width):
+                        bmp[x, y] = 0 if x < panel_w else (1 if x < panel_w * 2 else 2)
+
+                for panel_idx, digit in enumerate(["1", "2", "3"]):
+                    panel_start_x = panel_idx * panel_w
+                    digit_x = panel_start_x + (panel_w - 5) // 2
+                    digit_y = (height - 7) // 2
+                    for (dx, dy) in DIGITS[digit]:
+                        px = digit_x + dx
+                        py = digit_y + dy
+                        if 0 <= px < width and 0 <= py < height:
+                            bmp[px, py] = 3
+
+                tg = displayio.TileGrid(bmp, pixel_shader=pal)
+                splash = displayio.Group()
+                splash.append(tg)
+                display.root_group = splash
+                w.feed()
+            except Exception as disp_err:
+                print(f"Calibration display error: {disp_err}")
+                log_exception(disp_err)
+
+            rows = ""
+            panels = [("P1","0d0000","1"),("P2","000d00","2"),("P3","00000d","3")]
+            for name, swatch, num in panels:
+                btns = ""
+                for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
+                    btns += (
+                        "<button class=\"" + cls + " color-btn\" type=\"button\" "
+                        "onclick=\"pick('" + name + "','" + c + "',this)\">" + lbl + "</button>"
+                    )
+                rows += (
+                    "<td>"
+                    "<div class=\"swatch\" style=\"background:#" + swatch + ";"
+                    "font-size:28px;font-weight:bold;color:#aaa;line-height:60px;\">" + num + "</div>"
+                    "<strong>Panel " + num + "</strong><br>"
+                    "<small style=\"color:#ffaa00\">What color do you see?</small><br><br>"
+                    + btns +
+                    "<div id=\"sel_" + name + "\" style=\"margin-top:6px;color:#ffaa00;\"></div></td>"
+                )
+
+            body = (
+                html_head("RGB Calibration") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Your display shows 3 panels each lit a different "
+                "dim color, numbered 1, 2, and 3.</p>"
+                "<p style=\"color:#ffaa00\"><strong>For each panel number below, click the "
+                "color you see glowing on your physical display for that panel.</strong><br>"
+                "Do not click what you expect to see — click only what you actually see.</p>"
+                "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
+                "<input type=\"hidden\" name=\"p1\" id=\"v_P1\">"
+                "<input type=\"hidden\" name=\"p2\" id=\"v_P2\">"
+                "<input type=\"hidden\" name=\"p3\" id=\"v_P3\">"
+                "<table class=\"calib\"><tr>" + rows + "</tr></table><br>"
+                "<button class=\"btn-green\" type=\"submit\" id=\"applybtn\" disabled "
+                "style=\"font-size:1.1em;padding:10px 30px;\">&#x2713; Apply Color Order</button>"
+                "<a href=\"/calibrate-cancel\"><button class=\"btn-gray\" type=\"button\" "
+                "style=\"margin-left:10px;\">Cancel</button></a>"
+                "</form></div>"
+                "<script>"
+                "var picks={};"
+                "function pick(panel,color,btn){"
+                "picks[panel]=color;"
+                "document.getElementById('v_'+panel).value=color;"
+                "var cell=btn.parentNode;"
+                "var btns=cell.querySelectorAll('button');"
+                "for(var i=0;i<btns.length;i++){btns[i].style.opacity='0.4';}"
+                "btn.style.opacity='1';btn.style.outline='2px solid #fff';"
+                "document.getElementById('sel_'+panel).textContent='Selected: '+color;"
+                "if(picks['P1']&&picks['P2']&&picks['P3']){"
+                "document.getElementById('applybtn').disabled=false;}}"
+                "</script>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /calibrate-cancel ─────────────────────────────────────────
+        @server.route("/calibrate-cancel", GET)
+        def route_calibrate_cancel(request):
+            global _calib_state
+            _calib_state["active"] = False
+            try:
+                matrixportal.display.root_group = matrixportal.splash
+                print("Calibration cancelled — display restored.")
+            except Exception as e:
+                print(f"Display restore error: {e}")
+            body = (
+                html_head("Calibration Cancelled") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
+                "<div class=\"card\"><p style=\"color:#aaa\">Calibration cancelled. Display restored.</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
+        # ── POST /calibrate-result ────────────────────────────────────────
+        @server.route("/calibrate-result", "POST")
+        def route_calibrate_result(request):
+            global _calib_state
+            _calib_state["active"] = False
+            try:
+                matrixportal.display.root_group = matrixportal.splash
+            except Exception:
+                pass
+            try:
+                p = parse_post_body(request)
+                print("Calibration POST body: " + str(p))
+                p1 = p.get("p1", "R").upper()
+                p2 = p.get("p2", "G").upper()
+                p3 = p.get("p3", "B").upper()
+                print(f"Calibration: P1={p1} P2={p2} P3={p3}")
+                order_str = p1 + p2 + p3
+                if order_str not in VALID_COLOR_ORDERS:
+                    raise ValueError("Invalid order: " + order_str)
+                settings["color_order"] = order_str
+                ok = save_settings(settings)
+                print(f"Calibration: P1={p1} P2={p2} P3={p3} -> {order_str} saved={ok}")
+                status = ("Color order set to <strong>" + order_str + "</strong>. " +
+                          ("Saved! Reboot to apply." if ok else "Save failed."))
+                cls = "status-ok" if ok else "status-err"
+            except Exception as e:
+                status = "Calibration error: " + str(e)
+                cls = "status-err"
+                log_exception(e)
+
+            body = (
+                html_head("Calibration Complete") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x1F3A8; Calibration Complete</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
+                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
+                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
+                "</form></div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /export-settings ──────────────────────────────────────────
+        @server.route("/export-settings", GET)
+        def route_export_settings(request):
+            try:
+                with open(SETTINGS_FILE, "r") as f:
+                    settings_data = f.read()
+            except Exception:
+                settings_data = "{}"
+            try:
+                with open(SIGNS_FILE, "r") as f:
+                    signs_data = f.read()
+            except Exception:
+                signs_data = '{"favorites":[]}'
+            bundle = json.dumps({
+                "settings": json.loads(settings_data),
+                "signs":    json.loads(signs_data),
+                "source_ip": str(wifi.radio.ipv4_address),
+                "source_version": LOCAL_VERSION
+            })
+            print(f"Export requested by {request.client_address}")
+            return Response(request, content_type="application/json",
+                          headers={"Connection":"close"}, body=bundle)
+
+        # ── GET /sync ─────────────────────────────────────────────────────
+        @server.route("/sync", GET)
+        def route_sync_page(request):
+            body = (
+                html_head("Matrix Portal S3 - Sync") +
+                "<body>" + html_nav("sync") +
+                "<h1>&#x1F4E1; Sync from Another Unit</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Enter the IP address of the source unit "
+                "and select which files to sync. Your current files will be overwritten.</p>"
+                "<form method=\"POST\" action=\"/sync-from\">"
+                "<div class=\"row\">"
+                "<label>Source IP:</label>"
+                "<input type=\"text\" name=\"source_ip\" placeholder=\"192.168.x.x\" "
+                "style=\"width:160px\" required>"
+                "</div><br>"
+                "<div class=\"row\">"
+                "<label style=\"min-width:0\">"
+                "<input type=\"checkbox\" name=\"sync_settings\" value=\"1\" checked> "
+                "Sync <strong>settings.json</strong> "
+                "<span style=\"color:#888\">(color, timing, display settings)</span>"
+                "</label>"
+                "</div>"
+                "<div class=\"row\" style=\"margin-top:8px\">"
+                "<label style=\"min-width:0\">"
+                "<input type=\"checkbox\" name=\"sync_signs\" value=\"1\" checked> "
+                "Sync <strong>signs.json</strong> "
+                "<span style=\"color:#888\">(favorite sign list)</span>"
+                "</label>"
+                "</div><br>"
+                "<button class=\"btn-cyan\" type=\"submit\">&#x1F4E1; Sync Now</button>"
+                "</form></div>"
+                "<div class=\"card\">"
+                "<h2>Export This Unit</h2>"
+                "<p style=\"color:#aaa\">Other units can sync from this one at:</p>"
+                "<p><strong style=\"color:#00ccff\">http://" + str(wifi.radio.ipv4_address) + "/export-settings</strong></p>"
+                "</div>"
+                "</body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
+        # ── POST /sync-from ───────────────────────────────────────────────
+        @server.route("/sync-from", "POST")
+        def route_sync_from(request):
+            p = parse_post_body(request)
+            source_ip = p.get("source_ip", "").strip()
+            do_settings = p.get("sync_settings", "") == "1"
+            do_signs    = p.get("sync_signs", "")    == "1"
+
+            if not source_ip:
+                body = (html_head("Sync Error") + "<body>" + html_nav("sync") +
+                        "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
+                        "<div class=\"card\"><p class=\"status-err\">No source IP provided.</p>"
+                        "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
+                        "</div></body></html>")
+                return Response(request, content_type="text/html",
+                              headers={"Connection":"close"}, body=body)
+
+            print(f"Sync requested from {source_ip} settings={do_settings} signs={do_signs}")
+            matrixportal.set_text_color(dim(0x00FFFF), 0)
+            matrixportal.set_text(center_multiline_string("SYNCING\nFROM\n" + source_ip, characters_per_line), 0)
+            w.feed()
+
+            status_lines = []
+            cls = "status-ok"
+            sync_resp = None
+            try:
+                url = "http://" + source_ip + "/export-settings"
+                sync_resp = requests.get(url, timeout=10)
+                w.feed()
+                if sync_resp.status_code != 200:
+                    raise RuntimeError("HTTP " + str(sync_resp.status_code))
+
+                bundle = json.loads(sync_resp.text)
+                sync_resp.close()
+                sync_resp = None
+                w.feed()
+
+                source_ver = bundle.get("source_version", "?")
+                status_lines.append("Connected to v" + source_ver + " at " + source_ip)
+
+                if do_settings and "settings" in bundle:
+                    ok = save_settings(bundle["settings"])
+                    if ok:
+                        loaded = load_settings()
+                        settings.update(loaded)
+                        sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
+                        sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
+                        _show_timestamp[0] = bool(settings.get("show_timestamp", True))
+                        _override_dwell[0] = bool(settings.get("override_api_dwell", False))
+                        matrixportal.set_text_color(dim(sign_text_color[0]), 0)
+                        status_lines.append("&#x2713; settings.json synced")
+                    else:
+                        status_lines.append("&#x2717; settings.json save failed")
+                        cls = "status-err"
+
+                if do_signs and "signs" in bundle:
+                    ok = save_favorite_signs(
+                        bundle["signs"].get("favorites", []),
+                        bundle["signs"].get("aliases", {}))
+                    if ok:
+                        favsign_list.clear()
+                        favsign_list.extend(bundle["signs"].get("favorites", []))
+                        status_lines.append("&#x2713; signs.json synced ("
+                                           + str(len(favsign_list)) + " favorites)")
+                    else:
+                        status_lines.append("&#x2717; signs.json save failed")
+                        cls = "status-err"
+
+                if not do_settings and not do_signs:
+                    status_lines.append("Nothing selected to sync.")
+                    cls = "status-err"
+
+            except Exception as e:
+                status_lines.append("Sync error: " + str(e))
+                cls = "status-err"
+                log_exception(e)
+            finally:
+                if sync_resp is not None:
+                    try:
+                        sync_resp.close()
+                    except Exception:
+                        pass
+                gc.collect()
+
+            matrixportal.set_text_color(dim(sign_text_color[0]), 0)
+            matrixportal.set_text("", 0)
+
+            status_html = "<br>".join(status_lines)
+            body = (
+                html_head("Sync Complete") +
+                "<body>" + html_nav("sync") +
+                "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
+                "<div class=\"card\"><p class=\"" + cls + "\">" + status_html + "</p>"
+                "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back to Sync</button></a>"
+                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot to Apply</button>"
+                "</form></div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
+        server.start("0.0.0.0", port=80)
+        print(f"Web server active at http://{wifi.radio.ipv4_address}/")
+    except Exception as e:
+        print(f"Web server start failed: {e}")
+        log_exception(e)
+        HAS_HTTPSERVER = False
+
+# --- Load Favorite Signs List ---
+favsign_list = load_favorite_signs()
+# Migration: pre-2.2.75 favorites were keyed by sign NAME. New API keys by ID,
+# which always contains "*". If any stored favorite lacks "*", it's old-format —
+# reset favorites (and aliases) once so the user re-selects on the new API.
+if favsign_list and not all("*" in str(f) for f in favsign_list):
+    print("Old-format (name-based) favorites detected. Resetting for new API.")
+    save_favorite_signs([], {})
+    favsign_list = []
+
+if favsign_list:
+    print(f"Loaded {len(favsign_list)} favorite sign(s) from signs.json.")
+else:
+    print("No favorite signs loaded (signs.json missing or empty).")
+    print("Visit the Traffic Signs tab on the web UI to select signs.")
+
+# --- Main Loop ---
+cycles = 0
+w.feed()
+
+while True:
+    cycles += 1
+    print(f"\n{'*' * 48}")
+    print(f"Cycle #{cycles}  Free RAM: {gc.mem_free()} bytes")
+    print(f"{'*' * 48}")
+    w.feed()
+    gc.collect()
+
+    if cycles > 1 and pool is not None:
+        try:
+            ssl_context = ssl.create_default_context()
+            try:
+                ssl_context.load_verify_locations(cadata="")
+            except Exception:
+                pass
+            requests = adafruit_requests.Session(pool, ssl_context)
+            gc.collect()
+        except Exception as _sess_err:
+            print(f"Session refresh failed: {_sess_err}")
+
+    if _reboot_pending[0]:
+        _reboot_pending[0] = False
+        print("Rebooting as requested by web UI...")
+        time.sleep(0.5)
+        import supervisor
+        supervisor.reload()
+
+    if _refresh_cache_pending[0]:
+        _refresh_cache_pending[0] = False
+        if wifi.radio.connected and requests is not None:
+            refresh_signs_cache_from_api()
+            try:
+                requests = adafruit_requests.Session(pool, ssl_context)
+                gc.collect()
+                gc.collect()
+            except Exception:
+                pass
+            print("Cache refresh complete — skipping regular fetch this cycle.")
+            safe_delay(cycle_sleep_secs)
+            continue
+        else:
+            print("Cache refresh skipped — no network.")
+
+    if _id_flash_pending[0]:
+        _id_flash_pending[0] = False
+        unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
+        print(f"ID flash: displaying {unit_label!r}")
+        flash_colors = [COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED,
+                        COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED]
+        for fc in flash_colors:
+            w.feed()
+            matrixportal.set_text_color(dim(fc), 0)
+            matrixportal.set_text(center_multiline_string(unit_label, characters_per_line), 0)
+            time.sleep(0.4)
+        matrixportal.set_text("", 0)
+        print("ID flash complete.")
+
+    if not wifi.radio.connected:
+        print("WiFi dropped. Reconnecting...")
+        if not connect_wifi():
+            print("Reconnect failed. Retrying in 10s...")
+            safe_delay(10)
+            continue
+
+    if _api_error[0]:
+        matrixportal.set_text_color(dim(COLOR_RED), 0)
+        matrixportal.set_text(center_multiline_string(_api_error[0], characters_per_line), 0)
+        safe_delay(cycle_sleep_secs)
+        continue
+
+    print("Fetching 511NY signs data...")
+    response = None
+    json_data = None
+    matched_signs = []
+    try:
+        poll_server()
+
+        response = requests.get(NY511_URL, timeout=15)
+        w.feed()
+
+        for _ in range(5):
+            poll_server()
+        gc.collect()
+
+        if response.status_code == 401 or response.status_code == 403:
+            _api_error[0] = "BAD\nAPI KEY"
+            print(f"API rejected key: HTTP {response.status_code}. Stopping fetches.")
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
+            matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+            safe_delay(cycle_sleep_secs)
+            continue
+
+        if response.status_code == 404:
+            _api_error[0] = "BAD\nAPI URL"
+            print(f"API URL not found: HTTP 404. Stopping fetches.")
+            matrixportal.set_text_color(dim(COLOR_RED), 0)
+            matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+            safe_delay(cycle_sleep_secs)
+            continue
+
+        if response.status_code == 200:
+            print("API fetch successful. Parsing JSON...")
+            json_data = response.json()
+            w.feed()
+
+            try:
+                response.close()
+            except Exception:
+                pass
+            response = None
+
+            poll_server()
+
+            if isinstance(json_data, list):
+                sign_count = len(json_data)
+                print(f"Loaded {sign_count} signs from API.")
+                print("Extracting favorites...")
+
+                fav_set = set(favsign_list)  # set of sign IDs
+                use_friendly = settings.get("use_friendly_names", True)
+                sign_aliases = load_sign_aliases() if use_friendly else {}
+                for sign in json_data:
+                    sid = sign.get("id")
+                    if sid and sid in fav_set:
+                        ny_name = sign.get("name", sid)
+                        display_name = sign_aliases.get(sid, ny_name) if use_friendly else ny_name
+                        disp = sign.get("display") or {}
+                        props = sign.get("properties") or {}
+                        matched_signs.append({
+                            "id": sid,
+                            "name": display_name,
+                            "status": sign.get("status", ""),
+                            "pages": disp.get("pages", []),
+                            "dwell_ms": props.get("phaseDwellTime", 2500),
+                            "blank_ms": props.get("phaseBlankTime", 0),
+                            "last_updated": sign.get("lastUpdated", 0),
+                        })
+
+                json_data = None
+                gc.collect()
+                gc.collect()
+                print(f"Matched {len(matched_signs)} sign(s). Free RAM after GC: {gc.mem_free()}")
+
+                poll_server()
+
+                for match in matched_signs:
+                    if _reboot_pending[0]:
+                        break
+                    w.feed()
+                    print(f"\nMATCH: {match['name']}")
+                    display_sign(match, name_disp_secs, page_disp_secs)
+            else:
+                print(f"Unexpected API response type: {type(json_data)}")
+        else:
+            print(f"API returned HTTP {response.status_code}")
+
+    except Exception as e:
+        print(f"API/display error: {e}")
+        log_exception(e)
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        json_data = None
+        matched_signs = None
+        gc.collect()
+        gc.collect()
+        gc.collect()
+
+    print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
+    safe_delay(cycle_sleep_secs)
