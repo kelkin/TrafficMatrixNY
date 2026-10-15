@@ -16,7 +16,8 @@
 Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 
 Features:
-- Fetches live traffic sign data from the NY511 API and displays matched signs.
+- Fetches live traffic sign data from the NY511 signs.json API and displays
+  matched signs (matched by stable sign id).
 - MatrixPortal hardware initialized once at startup (not inside the loop).
 - SocketPool and Requests Session created once and reused across cycles.
 - Aggressive garbage collection to prevent heap fragmentation/memory exhaustion.
@@ -28,28 +29,27 @@ Features:
 - adafruit_httpserver used when available, with defensive fallback to rescue server.
 - Shadow library cleanup removes stale single-file httpserver remnants on boot.
 - GitHub OTA update engine driven by a JSON manifest file.
-  Uses atomic .tmp-then-rename writes with Content-Length validation to prevent
-  corrupt/truncated files from landing on the filesystem.
-  Full multi-file updates (code + libraries) in one pass.
 - Local and cloud version numbers displayed on the LED matrix at boot.
 
-Bugfixes vs. earlier revisions:
-- set_text_color() uses integer literals (0xRRGGBB), not CSS strings "#RRGGBB".
-- set_text_color() and set_text() pass label index 0 explicitly.
-- matrix_debug cast to bool before passing to MatrixPortal().
-- OTA version comparison parses manifest JSON correctly.
-- os.makedirs() replaced with per-level os.mkdir() (CircuitPython compatible).
-- All imports at module top level — no deferred imports inside functions.
-- safe_delay() polls the web server during all wait periods so the rescue
-  page remains responsive while sign data is being displayed.
+v2.2.75 changes (new 511NY signs API migration):
+- Default endpoint -> https://nyapi.carsprogram.org/signs.json (public, no key).
+- Response parser rewritten for the new nested shape:
+    id, name, status, display.pages[].lines[], properties.phaseDwellTime,
+    properties.phaseBlankTime, location.routeId, lastUpdated (epoch ms).
+- Favorites and aliases are now keyed by sign id (e.g. "nyRegion11Signs*505").
+- Old name-based favorites are auto-reset once on first boot after upgrade.
+- Message phases honor each sign's API phaseDwellTime; a web-settable
+  "Override API Dwell Time" checkbox forces page_display_seconds instead.
+- All non-message screens (name, NO MESSAGE, timestamp) use page_display_seconds.
+- Blank / errored signs (status != DISPLAYING_MESSAGE) render "NO MESSAGE".
+- Optional Mode-2 "Data Last Update" screen shown before each sign's message,
+  converted from epoch ms with automatic US-Eastern EST/EDT. Toggle in web UI.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.74"
+LOCAL_VERSION = "2.2.75"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
-# The color_order setting passed to MatrixPortal handles channel mapping at the
-# driver level. These are the colors as the user perceives them.
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
 COLOR_GREEN  = 0x00FF00  # Success / connected / verified
 COLOR_RED    = 0xFF0000  # Error / failed
@@ -76,8 +76,6 @@ from watchdog import WatchDogMode
 from adafruit_matrixportal.matrixportal import MatrixPortal
 
 # --- Shadow Library Cleanup ---
-# Removes stale single-file adafruit_httpserver.py/.mpy that would shadow the
-# package directory and cause import failures after an OTA update.
 for _shadow in ["/lib/adafruit_httpserver.py", "/lib/adafruit_httpserver.mpy"]:
     try:
         os.remove(_shadow)
@@ -144,23 +142,16 @@ def log_exception(e):
             print(f"Exception logging failed: {e}")
 
 # --- Defensive adafruit_httpserver import with fallback ---
-# The library renamed its classes in newer versions:
-#   HTTPServer -> Server
-#   HTTPResponse -> Response
-#   HTTPMethod.GET -> GET (imported directly from methods)
-# We try the new names first, then fall back to the old names for compatibility.
 HAS_HTTPSERVER = False
 web_error_message = ""
 
 try:
-    # New API (current): Server, Response, GET
     from adafruit_httpserver.server import Server
     from adafruit_httpserver.response import Response
     from adafruit_httpserver.methods import GET
     HAS_HTTPSERVER = True
 except Exception as _new_err:
     try:
-        # Old API fallback: HTTPServer, HTTPResponse, HTTPMethod
         from adafruit_httpserver.server import HTTPServer as Server
         from adafruit_httpserver.response import HTTPResponse as Response
         from adafruit_httpserver.methods import HTTPMethod
@@ -168,7 +159,6 @@ except Exception as _new_err:
         HAS_HTTPSERVER = True
     except Exception as _old_err:
         try:
-            # Package-level fallback
             from adafruit_httpserver import HTTPServer as Server, HTTPResponse as Response, HTTPMethod
             GET = HTTPMethod.GET
             HAS_HTTPSERVER = True
@@ -180,22 +170,18 @@ except Exception as _new_err:
             except Exception:
                 web_error_message = "ERROR"
 
-# --- Secrets (ssid, password, ny511key only) ---
+# --- Secrets (ssid, password only; signs.json is public) ---
 try:
     from secrets import secrets
 except ImportError:
     print("WiFi secrets are kept in secrets.py, please add them there!")
     raise
 
-# NY511 API URL — only the key comes from secrets, everything else is static
-
 # OTA manifest URL (GitHub raw) — stored in secrets so it doesn't ship in code
 ENABLE_OTA   = secrets.get("enable_ota", False)
 MANIFEST_URL = secrets.get("github_version_url", "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/ota_manifest.json")
 
 # --- settings.json — all user-configurable values ---
-# secrets.py only holds ssid/password/ny511key.
-# Everything else lives here and is editable via the web UI.
 SETTINGS_FILE = "settings.json"
 
 _default_settings = {
@@ -213,10 +199,12 @@ _default_settings = {
     "characters_per_line":  30,      # Text wrapping width
     "brightness":           0.8,     # Display brightness 0.0-1.0
     "log_refresh_seconds":  5,       # Log page auto-refresh interval (0=disabled)
-    "api_url":              "https://511ny.org/api/getmessagesigns?format=json&key=",
-    "api_key":              "",      # Set via web UI or secrets.py
-    "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE", "WALL")
-    "use_friendly_names":   True,    # Show alias instead of NY511 sign name on LED if set
+    "api_url":              "https://nyapi.carsprogram.org/signs.json",
+    "api_key":              "",      # Unused on direct path; for premium Worker path
+    "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE")
+    "use_friendly_names":   True,    # Show alias instead of sign name on LED if set
+    "show_timestamp":       True,    # Show each sign's lastUpdated before its message
+    "override_api_dwell":   False,   # If True, message phases use page_display_seconds
 }
 
 def load_settings():
@@ -255,28 +243,21 @@ def hex_to_int(hex_str):
         return 0xF7B500  # fallback to sign yellow
 
 def color_for_display(hex_str):
-    """Convert a hex color string to the integer needed by set_text_color().
-    The hardware color_order passed to MatrixPortal at init handles all channel
-    remapping at the driver level. No software remapping needed.
-    """
+    """Convert a hex color string to the integer needed by set_text_color()."""
     return hex_to_int(hex_str)
 
 settings = load_settings()
 
-# API URL and key — read from settings.json, fall back to secrets.py
-# On first boot, migrate ny511key from secrets.py into settings.json
-_api_url = settings.get("api_url", "https://511ny.org/api/getmessagesigns?format=json&key=")
+# API URL and key — read from settings.json. New signs endpoint is public (no key).
+# api_key is retained only for the premium Worker path (which may use ?key=).
+_api_url = settings.get("api_url", "https://nyapi.carsprogram.org/signs.json")
 _api_key = settings.get("api_key", "")
-if not _api_key and secrets.get("ny511key", ""):
-    _api_key = secrets.get("ny511key", "")
-    settings["api_key"] = _api_key
-    save_settings(settings)
-    print("Migrated ny511key from secrets.py to settings.json")
 NY511_URL = _api_url + _api_key
+
 # All runtime values read from settings (loaded above)
 color_order         = settings.get("color_order", "RGB")
-sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]  # Remapped for hardware color order
-sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]  # Remapped for hardware color order
+sign_text_color     = [color_for_display(settings.get("sign_text_color", "#F7B500"))]
+sign_name_color     = [color_for_display(settings.get("sign_name_color",  "#0000FF"))]
 name_disp_secs      = int(settings.get("name_display_seconds", 3))
 msg_disp_secs       = int(settings.get("msg_display_seconds", 10))
 cycle_sleep_secs    = int(settings.get("cycle_sleep_seconds", 30))
@@ -292,14 +273,10 @@ print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_co
       + "s cycle=" + str(cycle_sleep_secs) + "s")
 
 # Mutable brightness container — updated live from settings, no reboot needed.
-# dim() scales any 0xRRGGBB integer by the current brightness factor.
 _brightness = [max(0.05, min(1.0, brightness))]
 
 def dim(color_int):
-    """Scale an 0xRRGGBB integer by the current brightness factor.
-    Returns color unchanged at 100%. At lower brightness, each non-zero
-    channel is clamped to a minimum of 16 (0x10) so the display stays
-    visible — the MatrixPortal needs at least this to drive the panels."""
+    """Scale an 0xRRGGBB integer by the current brightness factor."""
     f = _brightness[0]
     if f >= 1.0:
         return color_int
@@ -311,13 +288,52 @@ def dim(color_int):
     b = (max(16, int(b_in * f)) if b_in > 0 else 0)
     return (r << 16) | (g << 8) | b
 
-# --- signs.json — favorite sign names (replaces sign_list.txt) ---
+# --- Live-updatable display flags (changed from web UI, no reboot) ---
+_show_timestamp = [bool(settings.get("show_timestamp", True))]
+_override_dwell = [bool(settings.get("override_api_dwell", False))]
+
+def _eastern_is_dst(tm):
+    """Approximate US-Eastern DST test from a UTC struct_time. Good enough for a
+    cosmetic timestamp label (only ambiguous within the 2 transition hours/yr).
+    tm_wday: Monday=0 .. Sunday=6."""
+    m = tm.tm_mon
+    if m < 3 or m > 11:
+        return False
+    if 3 < m < 11:
+        return True
+    # Date of the most recent Sunday on/before this date:
+    last_sunday = tm.tm_mday - ((tm.tm_wday + 1) % 7)
+    if m == 3:
+        return last_sunday >= 8    # DST begins 2nd Sunday of March
+    return last_sunday <= 0         # DST ends 1st Sunday of November
+
+def epoch_to_local_str(ms):
+    """Convert epoch milliseconds (UTC) to ('M/D/YY H:MMAM', 'EDT'/'EST').
+    time.localtime(secs) performs pure UTC decomposition on CircuitPython
+    (no timezone DB), so we add the Eastern offset ourselves."""
+    try:
+        secs = int(ms) // 1000
+        if secs <= 0:
+            return ("UNKNOWN", "ET")
+        utc = time.localtime(secs)
+        dst = _eastern_is_dst(utc)
+        offset = -4 * 3600 if dst else -5 * 3600
+        lt = time.localtime(secs + offset)
+        label = "EDT" if dst else "EST"
+        h = lt.tm_hour
+        ap = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return ("{:d}/{:d}/{:02d} {:d}:{:02d}{}".format(
+            lt.tm_mon, lt.tm_mday, lt.tm_year % 100, h12, lt.tm_min, ap), label)
+    except Exception:
+        return ("UNKNOWN", "ET")
+
+# --- signs.json — favorite sign IDs (replaces name-based list) ---
 SIGNS_FILE       = "signs.json"
 SIGNS_CACHE_FILE = "signs_cache.json"
 
 def refresh_signs_cache_from_api():
-    """Fetch all sign names from NY511 and save to signs_cache.json.
-    Called from the main loop so watchdog feeds work correctly throughout."""
+    """Fetch all signs from the API and save a slim cache (id/name/roadway)."""
     print("Fetching NY511 sign cache...")
     matrixportal.set_text_color(dim(0x00FFFF), 0)
     matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
@@ -342,16 +358,14 @@ def refresh_signs_cache_from_api():
 
         sign_data = []
         for sign in api_data:
-            w.feed()  # Feed watchdog while iterating 933 signs
-            if "Name" in sign:
-                # Store name + messages (drop lat/long/roadway to save space)
-                msgs = sign.get("Messages", [])
-                if isinstance(msgs, str):
-                    msgs = [msgs]
-                elif not isinstance(msgs, list):
-                    msgs = []
-                roadway = sign.get("Roadway", "")
-                sign_data.append({"name": sign["Name"], "messages": msgs, "roadway": roadway})
+            w.feed()  # Feed watchdog while iterating signs
+            sid = sign.get("id")
+            if not sid:
+                continue
+            name = sign.get("name", sid)
+            loc = sign.get("location") or {}
+            roadway = loc.get("routeId", "")
+            sign_data.append({"id": sid, "name": name, "roadway": roadway})
 
         sign_data.sort(key=lambda s: s["name"])
         api_data = None
@@ -377,13 +391,12 @@ def refresh_signs_cache_from_api():
                 resp_obj.close()
             except Exception:
                 pass
-        # Restore normal display color
         matrixportal.set_text_color(dim(sign_text_color[0]), 0)
         matrixportal.set_text("", 0)
         gc.collect()
 
 def load_favorite_signs():
-    """Load the list of favorite sign names from signs.json."""
+    """Load the list of favorite sign IDs from signs.json."""
     try:
         with open(SIGNS_FILE, "r") as f:
             data = json.loads(f.read())
@@ -392,8 +405,8 @@ def load_favorite_signs():
         return []
 
 def load_sign_aliases():
-    """Load the friendly name aliases dict from signs.json.
-    Returns {"NY511 sign name": "Friendly name", ...}"""
+    """Load the friendly-name aliases dict from signs.json.
+    Returns {"<sign id>": "Friendly name", ...}"""
     try:
         with open(SIGNS_FILE, "r") as f:
             data = json.loads(f.read())
@@ -405,7 +418,6 @@ def save_favorite_signs(favorites_list, aliases_dict=None):
     """Save favorites list (and optional aliases dict) to signs.json atomically."""
     tmp = SIGNS_FILE + ".tmp"
     try:
-        # Preserve existing aliases if none supplied
         if aliases_dict is None:
             aliases_dict = load_sign_aliases()
         payload = {"favorites": favorites_list, "aliases": aliases_dict}
@@ -423,22 +435,17 @@ def save_favorite_signs(favorites_list, aliases_dict=None):
 
 def load_signs_cache():
     """Load sign cache from signs_cache.json.
-    Returns list of {"name": str, "messages": list} dicts.
-    Handles old format (list of strings) by converting transparently."""
+    Returns list of {"id","name","roadway"} dicts."""
     try:
         with open(SIGNS_CACHE_FILE, "r") as f:
             data = json.loads(f.read())
-        signs = data.get("signs", [])
-        # Handle old format: list of plain strings
-        if signs and isinstance(signs[0], str):
-            return [{"name": s, "messages": [], "roadway": ""} for s in signs]
-        return signs
+        return data.get("signs", [])
     except Exception:
         return []
 
 def save_signs_cache(sign_data):
     """Save sign data to signs_cache.json atomically.
-    sign_data: list of {"name": str, "messages": list} dicts."""
+    sign_data: list of {"id","name","roadway"} dicts."""
     tmp = SIGNS_CACHE_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -472,7 +479,7 @@ matrixportal.add_text(
     text_position=(0, 15),
     scrolling=False,
     line_spacing=0.8,
-    text_color=dim(sign_text_color[0])  # remapped for hardware color order
+    text_color=dim(sign_text_color[0])
 )
 # Note: FramebufferDisplay.brightness only supports 0.0 (off) or 1.0 (full).
 # True brightness is controlled via bit_depth at initialization — see settings.
@@ -490,63 +497,73 @@ def clean_string(text):
     text = " ".join(str(i) for i in text) if isinstance(text, list) else str(text)
     return text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
 
-def paginate_message(msg_string, lines_per_page=3):
-    """Split a raw message string into display pages.
-
-    Handles both \n separators in the raw string and the literal backslash-n
-    that sometimes appears in the API data. Returns a list of strings, each
-    containing at most lines_per_page lines joined by newlines.
-
-    Example:
-        "LINE1\nLINE2\nLINE3\nLINE4\nLINE5" with lines_per_page=3
-        -> ["LINE1\nLINE2\nLINE3", "LINE4\nLINE5"]
-    """
-    # Normalise escaped newlines from API
-    normalised = msg_string.replace("\\n", "\n").replace("\n", "\n")
-    lines = [l for l in normalised.split("\n") if l.strip()]
-    pages = []
-    for i in range(0, max(1, len(lines)), lines_per_page):
-        pages.append("\n".join(lines[i:i + lines_per_page]))
-    return pages if pages else [""]
-
 def display_sign(match, name_secs, page_secs, lines_per_page=3):
-    """Display one matched sign: name first, then all message pages in order."""
+    """Display one matched sign: optional update-time, then name, then phases.
+    - Message phases use the API phaseDwellTime unless override is enabled.
+    - All non-message info (timestamp, name, NO MESSAGE) uses page_secs."""
     if _reboot_pending[0] or _id_flash_pending[0]:
-        return  # Exit immediately if reboot or ID flash requested
+        return
 
-    # Show sign name
-    clean_name = clean_string(match["name"])
-    centered_name = center_multiline_string(clean_name, characters_per_line)
+    # Mode-2 timestamp: each sign's own lastUpdated, shown before its message
+    if _show_timestamp[0]:
+        ts_str, tz = epoch_to_local_str(match.get("last_updated", 0))
+        matrixportal.set_text_color(dim(COLOR_CYAN), 0)
+        matrixportal.set_text(center_multiline_string(
+            "Data Last Update\n" + ts_str + " (" + tz + ")", characters_per_line), 0)
+        safe_delay(page_secs)
+        w.feed()
+        if _reboot_pending[0] or _id_flash_pending[0]:
+            return
+
+    # Sign name
+    clean_name = clean_string(match.get("name", ""))
     print(f"Name: {clean_name}")
     matrixportal.set_text_color(dim(sign_name_color[0]), 0)
-    matrixportal.set_text(centered_name, 0)
+    matrixportal.set_text(center_multiline_string(clean_name, characters_per_line), 0)
     safe_delay(name_secs)
     w.feed()
-
     if _reboot_pending[0] or _id_flash_pending[0]:
-        return  # Exit if reboot or ID flash requested after name display
+        return
 
-    # Normalise messages to a list
-    raw_messages = match["msg"]
-    if isinstance(raw_messages, str):
-        raw_messages = [raw_messages]
-    elif not isinstance(raw_messages, list):
-        raw_messages = [str(raw_messages)]
+    status = match.get("status", "")
+    pages = match.get("pages", []) or []
 
-    # Display each message, paginated
     matrixportal.set_text_color(dim(sign_text_color[0]), 0)
-    for raw_msg in raw_messages:
+
+    # Blank / errored / message-less signs
+    if status != "DISPLAYING_MESSAGE" or not pages:
+        matrixportal.set_text(center_multiline_string("NO MESSAGE", characters_per_line), 0)
+        safe_delay(page_secs)
+        w.feed()
+        return
+
+    # Per-phase dwell: API value (seconds) unless override enabled
+    if _override_dwell[0]:
+        phase_secs = page_secs
+    else:
+        try:
+            phase_secs = max(0.5, int(match.get("dwell_ms", 2500)) / 1000.0)
+        except Exception:
+            phase_secs = page_secs
+
+    try:
+        blank_secs = max(0, int(match.get("blank_ms", 0)) / 1000.0)
+    except Exception:
+        blank_secs = 0
+
+    for page in pages:
         if _reboot_pending[0] or _id_flash_pending[0]:
-            return  # Exit immediately if reboot or ID flash requested
-        clean_msg = clean_string(raw_msg)
-        pages = paginate_message(clean_msg, lines_per_page)
-        for page in pages:
-            if _reboot_pending[0] or _id_flash_pending[0]:
-                return  # Exit immediately if reboot or ID flash requested
-            centered_page = center_multiline_string(page, characters_per_line)
-            print(f"Page:\n{centered_page}")
-            matrixportal.set_text(centered_page, 0)
-            safe_delay(page_secs)
+            return
+        lines = page.get("lines", []) if isinstance(page, dict) else []
+        text = "\n".join(str(l) for l in (lines or []))
+        centered = center_multiline_string(text, characters_per_line)
+        print(f"Page:\n{centered}")
+        matrixportal.set_text(centered, 0)
+        safe_delay(phase_secs)
+        w.feed()
+        if blank_secs > 0:
+            matrixportal.set_text("", 0)
+            safe_delay(blank_secs)
             w.feed()
 
 def ensure_dir_exists(filepath):
@@ -559,7 +576,7 @@ def ensure_dir_exists(filepath):
             try:
                 os.mkdir(current_path)
             except OSError as e:
-                if e.errno != 17:  # 17 = EEXIST — directory already exists, fine
+                if e.errno != 17:  # 17 = EEXIST
                     raise
 
 # --- Raw Socket Rescue Web Server ---
@@ -604,19 +621,13 @@ def safe_send(conn, data):
                 break
             sent_total += sent
         except OSError as e:
-            if e.errno == 11:  # EAGAIN — socket buffer full, retry
+            if e.errno == 11:  # EAGAIN
                 time.sleep(0.01)
                 continue
             raise
 
 def poll_rescue_server():
-    """Non-blocking poll: accepts one connection, sends the full log page, closes.
-
-    Firefox requires a Content-Length header — it will show a blank page or
-    connection reset if the response arrives in unpredictable chunks without one.
-    Fix: build the complete HTML body as a single string, measure its byte length,
-    send the header with that length, then send the body. One complete transaction.
-    """
+    """Non-blocking poll: accepts one connection, sends the full log page, closes."""
     global rescue_socket
     if rescue_socket is None:
         return
@@ -636,7 +647,6 @@ def poll_rescue_server():
                 pass
             time.sleep(0.05)
 
-        # Silently discard favicon requests — browsers always send one
         if request_str and "favicon.ico" in request_str:
             try:
                 conn.send(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -647,7 +657,6 @@ def poll_rescue_server():
 
         print(f"Rescue connection from {addr}")
 
-        # Escape log content so < > & render correctly in the browser
         log_lines = list(web_logger.buffer)
         if web_logger.current_line:
             log_lines.append(web_logger.current_line)
@@ -657,7 +666,6 @@ def poll_rescue_server():
                        .replace("<", "&lt;")
                        .replace(">", "&gt;"))
 
-        # Build the complete HTML body as one string so we can measure it
         body = (
             "<!DOCTYPE html><html><head>"
             "<title>Matrix Portal S3 - Rescue Console</title>"
@@ -678,7 +686,6 @@ def poll_rescue_server():
             "</body></html>"
         )
 
-        # Encode once to get the true byte length for Content-Length
         body_bytes = body.encode("utf-8")
         header = (
             "HTTP/1.1 200 OK\r\n"
@@ -706,9 +713,7 @@ def poll_rescue_server():
         gc.collect()
 
 def poll_server():
-    """Poll the active web server once, feeding the watchdog before and after.
-    server.poll() can block for several seconds while sending a large response,
-    so we must feed the watchdog both before and after each call."""
+    """Poll the active web server once, feeding the watchdog before and after."""
     if HAS_HTTPSERVER and server is not None:
         try:
             w.feed()
@@ -721,31 +726,27 @@ def poll_server():
     else:
         poll_rescue_server()
 
-# --- Shared mutable flags (defined here so safe_delay can reference them
-#     before the web server block initializes further below) ---
+# --- Shared mutable flags ---
 _calib_state          = {"active": False}
-_refresh_cache_pending = [False]  # Set by web UI, consumed by main loop
-_reboot_pending        = [False]  # Set by web routes, handled by main loop after response flushes
-_id_flash_pending      = [False]  # Set by /identify route, main loop flashes unit name on panels
-_signs_filter          = [""]    # Current search filter for signs page
-_signs_show_all        = [False] # Whether to show full unfiltered list
-_api_error             = [""]    # Non-empty = API error message, stops fetching until cleared
-_signs_page            = [0]     # Current page number for signs page
-_signs_show_all        = [False] # Whether to show full unfiltered list
+_refresh_cache_pending = [False]
+_reboot_pending        = [False]
+_id_flash_pending      = [False]
+_signs_filter          = [""]
+_signs_show_all        = [False]
+_api_error             = [""]
+_signs_page            = [0]
+_signs_show_all        = [False]
 
 def safe_delay(seconds):
-    """Sleeps for `seconds` while continuously feeding the watchdog and
-    polling the web server so the log page stays responsive.
-    Exits early if _reboot_pending or _id_flash_pending is set so those
-    actions happen within seconds rather than waiting for the current
-    display cycle to finish."""
+    """Sleeps for `seconds` while feeding the watchdog and polling the web server.
+    Exits early if _reboot_pending or _id_flash_pending is set."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
-        poll_server()  # includes w.feed() before and after
+        poll_server()
         if _reboot_pending[0]:
-            return  # Exit early — main loop will handle the reboot
+            return
         if _id_flash_pending[0]:
-            return  # Exit early — main loop will handle the ID flash
+            return
         time.sleep(0.01)
 
 # --- WiFi Connection ---
@@ -792,8 +793,6 @@ requests = None
 
 if connect_wifi():
     pool = socketpool.SocketPool(wifi.radio)
-    # Single SSL context with no cert verification — set it and forget it.
-    # No cert expiry issues, no support burden for customers.
     ssl_context = ssl.create_default_context()
     try:
         ssl_context.load_verify_locations(cadata="")
@@ -804,7 +803,6 @@ if connect_wifi():
     if not HAS_HTTPSERVER:
         start_rescue_server()
 
-    # Show web server status on matrix
     try:
         if HAS_HTTPSERVER:
             matrixportal.set_text_color(dim(COLOR_GREEN), 0)
@@ -817,15 +815,6 @@ if connect_wifi():
         pass
 
 # --- GitHub Manifest-Based Atomic OTA Updater ---
-# Manifest format expected at MANIFEST_URL:
-# {
-#   "version": "1.1.4",
-#   "files": {
-#     "code.py": "https://raw.githubusercontent.com/.../code.py",
-#     "lib/adafruit_logging.py": "https://raw.githubusercontent.com/...",
-#     ...
-#   }
-# }
 def perform_ota_check(requests_session, force=False):
     if not ENABLE_OTA or not MANIFEST_URL:
         print("OTA disabled or MANIFEST_URL not set.")
@@ -836,12 +825,10 @@ def perform_ota_check(requests_session, force=False):
 
     print(f"Checking for updates... Local: {LOCAL_VERSION}")
 
-    # Display local version on matrix
     matrixportal.set_text_color(dim(COLOR_CYAN), 0)
     matrixportal.set_text(center_multiline_string(f"LOCAL\nVERSION\n{LOCAL_VERSION}", characters_per_line), 0)
     safe_delay(2)
 
-    # Fetch manifest with retry
     response = None
     for retry in range(3):
         w.feed()
@@ -860,7 +847,6 @@ def perform_ota_check(requests_session, force=False):
             print(f"Manifest fetch returned HTTP {response.status_code}. Skipping OTA.")
             return
 
-        # Read and close the response before parsing to free the socket first
         raw_text = response.text
         response.close()
         response = None
@@ -886,7 +872,6 @@ def perform_ota_check(requests_session, force=False):
 
         print(f"Remote version: {remote_version}")
 
-        # Display remote version on matrix
         matrixportal.set_text_color(dim(COLOR_YELLOW), 0)
         matrixportal.set_text(center_multiline_string(f"CLOUD\nVERSION\n{remote_version}", characters_per_line), 0)
         safe_delay(2)
@@ -898,13 +883,12 @@ def perform_ota_check(requests_session, force=False):
             safe_delay(2)
             return
 
-        # New version — download all files to .tmp paths first, then swap atomically
         print(f"Update available: {LOCAL_VERSION} -> {remote_version}")
         print(f"Downloading {len(files_to_download)} file(s)...")
-        matrixportal.set_text_color(dim(0x00FF00), 0)  # Green
+        matrixportal.set_text_color(dim(0x00FF00), 0)
         matrixportal.set_text(center_multiline_string("DOWNLOADING\nFILES...", characters_per_line), 0)
 
-        successful_swaps = []  # List of (temp_path, final_path) tuples
+        successful_swaps = []
         total = len(files_to_download)
         current = 0
 
@@ -926,7 +910,6 @@ def perform_ota_check(requests_session, force=False):
                 file_content = file_response.text
                 w.feed()
 
-                # Validate size against Content-Length if server provides it
                 content_length = file_response.headers.get("content-length")
                 if content_length is not None:
                     expected = int(content_length)
@@ -934,7 +917,6 @@ def perform_ota_check(requests_session, force=False):
                     if actual != expected:
                         raise RuntimeError(f"Size mismatch: got {actual}, expected {expected}")
 
-                # Write to .tmp first — never touch the live file until validated
                 with open(temp_path, "w") as f:
                     f.write(file_content)
 
@@ -944,7 +926,7 @@ def perform_ota_check(requests_session, force=False):
             except OSError as fs_err:
                 print(f"    Write error for {local_path}: {fs_err}")
                 if local_path == "code.py":
-                    matrixportal.set_text_color(dim(0xFF0000), 0)  # Red
+                    matrixportal.set_text_color(dim(0xFF0000), 0)
                     matrixportal.set_text(center_multiline_string("WRITE\nLOCKED", characters_per_line), 0)
                     safe_delay(5)
                     return
@@ -962,7 +944,6 @@ def perform_ota_check(requests_session, force=False):
                         pass
                 gc.collect()
 
-        # All files downloaded and validated — now do the atomic rename swap
         print("All files staged. Applying atomic swap...")
         for temp_path, final_path in successful_swaps:
             try:
@@ -973,7 +954,7 @@ def perform_ota_check(requests_session, force=False):
             print(f"    Installed: {final_path}")
 
         print("Update complete! Rebooting...")
-        matrixportal.set_text_color(dim(0x00FF00), 0)  # Green
+        matrixportal.set_text_color(dim(0x00FF00), 0)
         matrixportal.set_text(center_multiline_string(f"SUCCESS\nNEW:{remote_version}", characters_per_line), 0)
         safe_delay(4)
         microcontroller.reset()
@@ -989,13 +970,13 @@ def perform_ota_check(requests_session, force=False):
                 pass
         gc.collect()
 
-# Run OTA check at startup — use same unverified context, no cert issues ever
+# Run OTA check at startup
 perform_ota_check(requests, force=False)
 
-# --- Boot: Show API source for 2 seconds so you can tell which server this unit uses ---
+# --- Boot: Show API source for 2 seconds ---
 _boot_api_url = settings.get("api_url", "")
-if "511ny.org" in _boot_api_url:
-    _api_label = "API:\nNY511"
+if "carsprogram.org" in _boot_api_url:
+    _api_label = "API:\n511NY DIRECT"
     _api_label_color = COLOR_GREEN
 elif "workers.dev" in _boot_api_url or "cloudflare" in _boot_api_url.lower():
     _api_label = "API:\nCLOUDFLARE"
@@ -1114,9 +1095,7 @@ def parse_post_body(request):
     return params
 
 def _parse_color_field(post_params, key, fallback):
-    """Extract and validate a hex color value from POST params.
-    Handles %23-encoded # and missing # prefix. Falls back to
-    current settings value or the provided fallback if invalid."""
+    """Extract and validate a hex color value from POST params."""
     v = post_params.get(key, settings.get(key, fallback))
     v = v.replace("%23", "#")
     if not v.startswith("#"):
@@ -1124,8 +1103,7 @@ def _parse_color_field(post_params, key, fallback):
     return v if len(v) == 7 else settings.get(key, fallback)
 
 def _is_too_bright(hex_color):
-    """Returns True if all three channels are above 0xC0 (75%) — near-white.
-    These colors draw too much current and are blocked to protect the PSU."""
+    """Returns True if all three channels are above 0xC0 (75%) — near-white."""
     try:
         r = int(hex_color[1:3], 16)
         g = int(hex_color[3:5], 16)
@@ -1141,14 +1119,10 @@ if HAS_HTTPSERVER and pool is not None:
         server = Server(pool)
         server.socket_timeout = 0.05
 
-        # Force Connection: close on all responses so Firefox doesn't wait
-        # for persistent connection data that never arrives.
-        # adafruit_httpserver doesn't send Content-Length by default,
-        # which causes Firefox (strict HTTP/1.1) to hang waiting for more data.
         try:
             server.headers["Connection"] = "close"
         except Exception:
-            pass  # If headers API differs, not fatal — Edge will still work
+            pass
 
         # ── GET / — Log page ──────────────────────────────────────────────
         @server.route("/", GET)
@@ -1156,7 +1130,6 @@ if HAS_HTTPSERVER and pool is not None:
             logs_html = (web_logger.get_logs()
                          .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
             log_refresh = int(settings.get("log_refresh_seconds", 5))
-            # Meta refresh must go inside <head> — inject it before </head>
             refresh_meta = ('<meta http-equiv="refresh" content="' + str(log_refresh) + '">'
                            if log_refresh > 0 else "")
             head = html_head("Matrix Portal S3 - Log")
@@ -1179,19 +1152,13 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
 
-
-
-        # ── GET /color-test/<order> — Test a color order directly ───────
-        # Sends raw yellow directly to the display with the given color_order.
-        # Helps find correct order empirically — no software remapping applied.
-        # Usage: navigate to /color-test/RGB, /color-test/GBR etc.
+        # ── GET /color-test/<order> ───────────────────────────────────────
         @server.route("/color-test/<order>", GET)
         def route_color_test(request, order):
             order = order.upper()
             if order not in VALID_COLOR_ORDERS:
                 order = "RGB"
             try:
-                # Show raw yellow (#FFFF00) without any remapping
                 matrixportal.set_text_color(dim(0xFFFF00), 0)
                 matrixportal.set_text(center_multiline_string(
                     "ORDER\n" + order + "\nYELLOW?", characters_per_line), 0)
@@ -1216,7 +1183,7 @@ if HAS_HTTPSERVER and pool is not None:
             return Response(request, content_type="text/html",
                           headers={"Connection":"close"}, body=body)
 
-        # ── GET /log-refresh/<n> — Set log auto-refresh interval ────────
+        # ── GET /log-refresh/<n> ──────────────────────────────────────────
         @server.route("/log-refresh/<n>", GET)
         def route_log_refresh(request, n):
             try:
@@ -1227,9 +1194,7 @@ if HAS_HTTPSERVER and pool is not None:
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/", "Connection": "close"}, body="")
 
-        # ── GET /rebooting — Safe landing page after reboot redirect ────
-        # This is a GET route so browser refresh won't re-trigger the reboot.
-        # Polls the board every 2 seconds until it comes back online.
+        # ── GET /rebooting ────────────────────────────────────────────────
         @server.route("/rebooting", GET)
         def route_rebooting(request):
             body = (
@@ -1253,12 +1218,6 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Connection":"close"}, body=body)
 
         # ── POST /reboot ──────────────────────────────────────────────────
-        # Uses Post/Redirect/Get pattern:
-        # 1. Send a 303 redirect to /rebooting (GET) before rebooting
-        # 2. Browser follows redirect, address bar now shows /rebooting
-        # 3. Board reboots — browser retries GET /rebooting harmlessly
-        # 4. Page polls until board is back, then redirects to /
-        # This prevents the "refresh re-submits POST and reboots again" problem.
         @server.route("/reboot", "POST")
         def route_reboot(request):
             print("Reboot requested via web UI.")
@@ -1273,7 +1232,7 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Location": "/rebooting", "Connection": "close"},
                           body="")
 
-        # ── POST /identify — Flash unit name on panels so you know which sign you're looking at ─
+        # ── POST /identify ────────────────────────────────────────────────
         @server.route("/identify", "POST")
         def route_identify(request):
             _id_flash_pending[0] = True
@@ -1301,7 +1260,7 @@ if HAS_HTTPSERVER and pool is not None:
             m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
             p_h, p_m, p_s = secs_to_hms(int(settings.get("page_display_seconds", 5)))
             c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
-            cur_m_h, cur_m_m, cur_m_s = m_h, m_m, m_s  # Ensure always defined
+            cur_m_h, cur_m_m, cur_m_s = m_h, m_m, m_s
 
             order_opts = ""
             for o in VALID_COLOR_ORDERS:
@@ -1325,7 +1284,7 @@ if HAS_HTTPSERVER and pool is not None:
                 (
                 "<div class=\"card\" style=\"border:2px solid #ff0000\">"
                 "<p class=\"status-err\">&#x26A0; API ERROR: " + _api_error[0].replace("\n"," ") + " — "
-                "Update the API URL or API Key below and save to resume.</p>"
+                "Update the API URL below and save to resume.</p>"
                 "</div>"
                 if _api_error[0] else ""
                 ) +
@@ -1401,14 +1360,28 @@ if HAS_HTTPSERVER and pool is not None:
                 "<div class=\"row\"><label>Friendly Names:</label>"
                 "<input type=\"checkbox\" name=\"use_friendly_names\" value=\"1\"" +
                 (" checked" if settings.get("use_friendly_names", True) else "") +
-                "> <small style=\"color:#888\">Show alias instead of NY511 sign name on LED "
+                "> <small style=\"color:#888\">Show alias instead of the sign name on LED "
                 "(set aliases on the <a href=\"/signs-favorites\" style=\"color:#00ccff\">"
                 "Favorites</a> page)</small>"
                 "</div>"
 
+                "<div class=\"row\"><label>Show Update Time:</label>"
+                "<input type=\"checkbox\" name=\"show_timestamp\" value=\"1\"" +
+                (" checked" if settings.get("show_timestamp", True) else "") +
+                "> <small style=\"color:#888\">Show each sign's last-updated time before its "
+                "message (recommended for 511NY compliance)</small>"
+                "</div>"
+
+                "<div class=\"row\"><label>Override API Dwell:</label>"
+                "<input type=\"checkbox\" name=\"override_api_dwell\" value=\"1\"" +
+                (" checked" if settings.get("override_api_dwell", False) else "") +
+                "> <small style=\"color:#888\">Use Page display time for message phases instead "
+                "of the dwell time published with each sign</small>"
+                "</div>"
+
                 "<div class=\"row\"><label>API URL:</label>"
                 "<input type=\"text\" name=\"api_url\" value=\"" +
-                settings.get("api_url","https://511ny.org/api/getmessagesigns?format=json&key=") +
+                settings.get("api_url","https://nyapi.carsprogram.org/signs.json") +
                 "\" style=\"width:420px;background:#222;color:#eee;border:1px solid #555;"
                 "border-radius:4px;padding:5px;font-family:monospace;font-size:0.85em\">"
                 "</div>"
@@ -1417,7 +1390,8 @@ if HAS_HTTPSERVER and pool is not None:
                 settings.get("api_key","") +
                 "\" style=\"width:280px;background:#222;color:#eee;border:1px solid #555;"
                 "border-radius:4px;padding:5px;font-family:monospace\">"
-                "<small style=\"color:#888;margin-left:8px\">Customer API key for your data provider</small>"
+                "<small style=\"color:#888;margin-left:8px\">Only needed for the premium "
+                "subscription server; leave blank for direct 511NY access</small>"
                 "</div>"
 
                 "<div class=\"row\"><label>Name display:</label>" +
@@ -1425,7 +1399,8 @@ if HAS_HTTPSERVER and pool is not None:
 
                 "<div class=\"row\"><label>Page display:</label>" +
                 hms_inputs("page", p_h, p_m, p_s) +
-                "<small style=\"color:#888\"> &mdash; time per page for long/multi messages</small></div>"
+                "<small style=\"color:#888\"> &mdash; used for name, timestamp, NO MESSAGE, "
+                "and message phases when Override is on</small></div>"
 
                 "<div class=\"row\"><label>Cycle interval:</label>" +
                 hms_inputs("cycle", c_h, c_m, c_s) + "</div>"
@@ -1449,9 +1424,12 @@ if HAS_HTTPSERVER and pool is not None:
         @server.route("/save-settings", "POST")
         def route_save_settings(request):
             global name_disp_secs, msg_disp_secs, page_disp_secs, cycle_sleep_secs
+            needs_reboot = False
+            status = ""
+            cls = "status-ok"
             try:
                 p = parse_post_body(request)
-                print("POST params: " + str(p))  # Debug — remove after confirming
+                print("POST params: " + str(p))
 
                 new_order = p.get("color_order", settings.get("color_order", "RGB")).upper()
                 if new_order not in VALID_COLOR_ORDERS:
@@ -1460,7 +1438,8 @@ if HAS_HTTPSERVER and pool is not None:
                 new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
                 new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
                 new_use_friendly = (p.get("use_friendly_names", "0") == "1")
-                # URL-decode percent-encoded characters from form submission
+                new_show_ts = (p.get("show_timestamp", "0") == "1")
+                new_override_dwell = (p.get("override_api_dwell", "0") == "1")
                 for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
                                    ("%26","&"),("%23","#"),("%40","@"),("%2B"," "),
                                    ("%20"," "),("%25","%"),("%2C",","),("%28","("),
@@ -1477,16 +1456,14 @@ if HAS_HTTPSERVER and pool is not None:
                 new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
                 new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
 
-                # Block near-white colors — all channels > 0xC0 draws too much current
                 color_warning = ""
                 if _is_too_bright(new_color):
-                    new_color = "#F7B500"  # fall back to amber
+                    new_color = "#F7B500"
                     color_warning = " Sign text color was too bright (near white) and was reset to amber to protect the power supply."
                 if _is_too_bright(new_name_color):
-                    new_name_color = "#0000FF"  # fall back to blue
+                    new_name_color = "#0000FF"
                     color_warning += " Sign name color was too bright (near white) and was reset to blue."
 
-                # Use current values as defaults so missing fields don't reset to 0
                 cur_n_h, cur_n_m, cur_n_s = secs_to_hms(name_disp_secs)
                 cur_m_h, cur_m_m, cur_m_s = secs_to_hms(msg_disp_secs)
                 cur_c_h, cur_c_m, cur_c_s = secs_to_hms(cycle_sleep_secs)
@@ -1501,8 +1478,9 @@ if HAS_HTTPSERVER and pool is not None:
                 new_cycle_secs = hms_to_secs(
                     p.get("cycle_h", cur_c_h), p.get("cycle_m", cur_c_m), p.get("cycle_s", cur_c_s))
 
+                needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
+
                 settings["depth"]                = new_depth
-                # Clear API error flag if URL or key changed
                 if new_api_url != settings.get("api_url","") or new_api_key != settings.get("api_key",""):
                     _api_error[0] = ""
                     print("API URL/key changed — clearing error flag, fetching will resume.")
@@ -1510,6 +1488,8 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["api_key"]              = new_api_key
                 settings["unit_name"]            = new_unit_name
                 settings["use_friendly_names"]   = new_use_friendly
+                settings["show_timestamp"]       = new_show_ts
+                settings["override_api_dwell"]   = new_override_dwell
                 settings["color_order"]          = new_order
                 settings["sign_text_color"]       = new_color
                 settings["sign_name_color"]        = new_name_color
@@ -1519,9 +1499,8 @@ if HAS_HTTPSERVER and pool is not None:
                 settings["cycle_sleep_seconds"]   = new_cycle_secs
                 try:
                     raw_b = p.get("brightness", settings.get("brightness", 0.8))
-                    # Dropdown sends integer percentages like "80"; settings stores floats like 0.8
                     raw_b = float(raw_b)
-                    if raw_b > 1.0:  # came in as percentage integer
+                    if raw_b > 1.0:
                         raw_b = raw_b / 100.0
                     new_brightness = max(0.05, min(1.0, raw_b))
                     print(f"Brightness: raw={p.get('brightness')} parsed={new_brightness}")
@@ -1539,941 +1518,18 @@ if HAS_HTTPSERVER and pool is not None:
                 cycle_sleep_secs = new_cycle_secs
                 sign_text_color[0] = color_for_display(new_color)
                 sign_name_color[0] = color_for_display(new_name_color)
-                _brightness[0]   = new_brightness  # Live — no reboot needed
+                _brightness[0]   = new_brightness
+                _show_timestamp[0] = new_show_ts
+                _override_dwell[0] = new_override_dwell
                 print(f"Brightness applied: _brightness={_brightness[0]} dim(yellow)={hex(dim(0xFFFF00))}")
                 matrixportal.set_text_color(dim(sign_text_color[0]), 0)
-                # Rebuild NY511_URL with new api_url/api_key if changed
                 global NY511_URL
                 NY511_URL = new_api_url + new_api_key
 
-                needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
                 if ok:
                     status = ("Saved! Reboot required to apply color order or scan quality change." if needs_reboot else "Saved! Settings applied.") + color_warning
                     cls = "status-ok"
                 else:
                     status = "Save failed."
                     cls = "status-err"
-                print("Settings saved: order=" + new_order
-                      + " msg_color=" + new_color + " name_color=" + new_name_color
-                      + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
-                      + "s cycle=" + str(new_cycle_secs) + "s")
-            except Exception as e:
-                status = "Error: " + str(e)
-                cls = "status-err"
-                log_exception(e)
-
-            body = (
-                html_head("Settings Saved") +
-                "<body>" + html_nav("settings") +
-                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
-                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
-                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
-                + ("&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
-                   "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
-                   "</form>" if needs_reboot else "") +
-                "</div></body></html>"
-            )
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── GET /signs — Traffic Signs page ───────────────────────────────
-        @server.route("/signs", GET)
-        def route_signs(request):
-            query   = _signs_filter[0]
-            cached  = load_signs_cache()
-            favs    = set(load_favorite_signs())
-            aliases = load_sign_aliases()   # {"NY511 name": "Friendly name"}
-            w.feed()
-
-            # Only build the full list when there's a search filter or show_all is set.
-            # Loading all 937 signs takes 30-60 seconds — require a search first.
-            if query == "__favorites__":
-                all_items = sorted([s for s in cached if s["name"] in favs],
-                                   key=lambda s: s["name"])
-            elif query.startswith("__roadway__:"):
-                rw = query[12:]  # strip prefix
-                all_items = sorted([s for s in cached
-                                    if s.get("roadway","").lower() == rw.lower()],
-                                   key=lambda s: s["name"])
-            elif query:
-                all_items = [s for s in cached if
-                             query in s["name"].lower() or
-                             query in s.get("roadway", "").lower()]
-            else:
-                all_items = None  # Show prompt instead
-            w.feed()
-
-            if all_items is None:
-                items_html = ""
-                sign_count_text = str(len(cached)) + " signs cached."
-                fav_count = len([s for s in cached if s["name"] in favs])
-
-                # Build sorted unique roadway list for browser
-                roadways = sorted(set(
-                    s.get("roadway","").strip()
-                    for s in cached
-                    if s.get("roadway","").strip()
-                ))
-                w.feed()
-
-                rw_items = "".join(
-                    '<div class="sign-item">'
-                    '<a href="/signs-roadway/' +
-                    rw.replace(" ","+").replace("/","%2F").replace("&","%26") +
-                    '" style="color:#eee;text-decoration:none">'
-                    '&#x1F6A6; ' + rw + '</a>'
-                    '</div>'
-                    for rw in roadways
-                )
-                w.feed()
-
-                list_section = (
-                    '<p style="color:#aaa">You have '
-                    '<strong style="color:#F7B500">' + str(fav_count) + ' favorites</strong> saved. '
-                    'Search by name/roadway above, browse by roadway below, '
-                    'or view your favorites.</p>'
-                    '<a href="/signs-favorites"><button class="btn-cyan">&#x2B50; My Favorites</button></a>'
-                    '<br><br>'
-                    '<div style="color:#ffaa00;font-weight:bold;margin-bottom:8px">'
-                    '&#x1F6A6; Browse by Roadway</div>'
-                    '<div class="sign-list">' + rw_items + '</div>'
-                )
-                breadcrumb = ""  # No breadcrumb on home view
-            else:
-                items_parts = []
-                for i, sign in enumerate(all_items):
-                    if i % 50 == 0:
-                        w.feed()
-                    name     = sign["name"]
-                    checked  = " checked" if name in favs else ""
-                    fav_cls  = " fav" if name in favs else ""
-                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
-                                     .replace(">","&gt;").replace('"',"&quot;"))
-                    msgs = sign.get("messages", [])
-                    if msgs:
-                        tip = str(msgs[0]).replace('"',"'")[:150]
-                    else:
-                        tip = "No message"
-                    roadway = sign.get("roadway", "")
-                    roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
-                                    'margin-top:-2px">' + roadway + '</div>' if roadway else "")
-                    alias_val = aliases.get(name, "").replace('"', "&quot;")
-                    alias_input = (
-                        '<input type="text" name="alias_' + safe_name + '" value="' + alias_val + '" '
-                        'placeholder="Friendly name..." '
-                        'style="width:160px;margin-left:8px;padding:2px 6px;font-size:0.85em;'
-                        'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
-                        'font-family:monospace;" title="Friendly name shown on LED instead of NY511 name">'
-                    ) if name in favs else ""
-                    items_parts.append(
-                        '<div class="sign-item' + fav_cls + '" title="' + tip + '">'
-                        '<label><input type="checkbox" name="fav" value="' +
-                        safe_name + '"' + checked + '> ' + safe_name + '</label>'
-                        + alias_input
-                        + roadway_html + '</div>'
-                    )
-                items_html = "".join(items_parts)
-                items_parts = None
-                w.feed()
-                gc.collect()
-                if query.startswith("__roadway__:"):
-                    sign_count_text = (str(len(all_items)) + " signs on " +
-                                      query[12:] + ".")
-                elif query == "__favorites__":
-                    sign_count_text = str(len(all_items)) + " favorite signs."
-                else:
-                    sign_count_text = str(len(all_items)) + " signs shown."
-
-                # Breadcrumb trail
-                crumb_base = '<a href="/signs" style="color:#00ccff">&#x1F6A6; Traffic Signs</a>'
-                if query.startswith("__roadway__:"):
-                    rw_name = query[12:]
-                    breadcrumb = (
-                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
-                        'border-bottom:1px solid #222">'
-                        + crumb_base +
-                        ' <span style="color:#555">&rsaquo;</span> '
-                        '<span style="color:#ffaa00">' + rw_name + '</span>'
-                        '</div>'
-                    )
-                elif query == "__favorites__":
-                    breadcrumb = (
-                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
-                        'border-bottom:1px solid #222">'
-                        + crumb_base +
-                        ' <span style="color:#555">&rsaquo;</span> '
-                        '<span style="color:#ffaa00">&#x2B50; My Favorites</span>'
-                        '</div>'
-                    )
-                elif query:
-                    breadcrumb = (
-                        '<div style="font-size:0.85em;color:#888;margin-bottom:10px;padding:6px 0;'
-                        'border-bottom:1px solid #222">'
-                        + crumb_base +
-                        ' <span style="color:#555">&rsaquo;</span> '
-                        '<span style="color:#ffaa00">Search: &ldquo;' + query + '&rdquo;</span>'
-                        '</div>'
-                    )
-                else:
-                    breadcrumb = ""
-                back_btn = ""  # Replaced by breadcrumb
-                list_section = (
-                    breadcrumb +
-                    '<form method="POST" action="/save-signs">'
-                    '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
-                    '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
-                    '</form>'
-                )
-
-            body = (
-                html_head("Traffic Signs") +
-                "<body>" + html_nav("signs") +
-                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
-                '<div class="card">'
-                '<form method="POST" action="/refresh-signs-cache" style="display:inline">'
-                '<button class="btn-cyan" type="submit">&#x1F504; Refresh from NY511</button>'
-                '</form>'
-                '<span style="color:#888;margin-left:15px;font-size:0.9em">'
-                'Fetches ~930 signs. Takes up to 90 seconds.</span>'
-                '</div>'
-                '<div class="card">' +
-                ('<p style="color:#aaa">' + sign_count_text +
-                 ' Favorites in <span style="color:#F7B500">yellow</span>. '
-                 'Hover a sign name to see its messages.</p>'
-                 if cached else
-                 '<p style="color:#aaa">No sign cache. Click Refresh to load from NY511.</p>') +
-                '<form method="POST" action="/signs-search">'
-                '<input type="text" name="q" value="' + (query if not query.startswith("__") else "") + '" '
-                'placeholder="Search by sign name or roadway..." autocomplete="off" '
-                'style="width:100%;margin-bottom:8px;padding:8px;background:#222;'
-                'color:#eee;border:1px solid #555;border-radius:4px;font-family:monospace;">'
-                '<button class="btn-gray" type="submit">&#x1F50D; Search</button>'
-                ' <a href="/signs-clear"><button class="btn-gray" type="button">&#x2715; Clear</button></a>'
-                '</form><br>'
-                + (('<div style="margin-bottom:8px">'
-                '<button class="btn-gray" type="button" onclick="selectAll()">&#x2611; Select All</button>'
-                ' <button class="btn-gray" type="button" onclick="deselectAll()">&#x2610; Deselect All</button>'
-                '</div>'
-                '<script>'
-                'function selectAll(){'
-                'document.querySelectorAll("#signlist input[type=checkbox]")'
-                '.forEach(function(b){b.checked=true;});}'
-                'function deselectAll(){'
-                'document.querySelectorAll("#signlist input[type=checkbox]")'
-                '.forEach(function(b){b.checked=false;});}'
-                '</script>') if all_items is not None else "") +
-                list_section +
-                '</div></body></html>'
-            )
-            w.feed()
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── GET /signs-clear — Clear the search filter ────────────────────
-        @server.route("/signs-clear", GET)
-        def route_signs_clear(request):
-            _signs_filter[0] = ""
-            _signs_show_all[0] = False  # Don't auto-load full list
-            return Response(request, status=(303, "See Other"),
-                          headers={"Location": "/signs", "Connection": "close"},
-                          body="")
-
-        # ── GET /signs-roadway/<rw> — Browse signs on a specific roadway ──
-        @server.route("/signs-roadway/<rw>", GET)
-        def route_signs_roadway(request, rw):
-            # URL-decode the roadway name
-            roadway = rw.replace("+", " ")
-            for code, char in [("%2F","/"),("%26","&"),("%2D","-"),
-                                ("%28","("),("%29",")"),("%2C",",")]:
-                roadway = roadway.replace(code, char).replace(code.lower(), char)
-            _signs_filter[0] = "__roadway__:" + roadway
-            return Response(request, status=(303, "See Other"),
-                          headers={"Location": "/signs", "Connection": "close"},
-                          body="")
-
-        # ── GET /signs-favorites — Show only favorited signs ─────────────
-        @server.route("/signs-favorites", GET)
-        def route_signs_favorites(request):
-            _signs_filter[0]   = "__favorites__"
-            _signs_show_all[0] = False
-            return Response(request, status=(303, "See Other"),
-                          headers={"Location": "/signs", "Connection": "close"},
-                          body="")
-
-        # ── POST /signs-search — Set filter and redirect to /signs ────────
-        @server.route("/signs-search", "POST")
-        def route_signs_search(request):
-            p = parse_post_body(request)
-            q = p.get("q", "").strip().lower()
-            _signs_filter[0]   = q
-            return Response(request, status=(303, "See Other"),
-                          headers={"Location": "/signs", "Connection": "close"},
-                          body="")
-
-                # ── POST /refresh-signs-cache — Queue a NY511 cache refresh ────────
-        # Returns immediately to the browser to avoid watchdog timeout.
-        # The actual fetch is done by the main loop on the next cycle.
-        @server.route("/refresh-signs-cache", "POST")
-        def route_refresh_cache(request):
-            _refresh_cache_pending[0] = True
-            print("NY511 cache refresh queued — will run on next main loop cycle.")
-            body = (
-                html_head("Refreshing Signs...") +
-                "<body>" + html_nav("signs") +
-                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
-                "<div class=\"card\">"
-                "<p style=\"color:#ffaa00\">&#x23F3; Fetching signs from NY511...</p>"
-                "<p style=\"color:#aaa\">This takes up to 90 seconds. "
-                "The page will redirect automatically when done.</p>"
-                "<script>setTimeout(function(){window.location='/signs'},95000);</script>"
-                "</div></body></html>"
-            )
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── POST /save-signs — Save favorite selections ──────────────────
-        @server.route("/save-signs", "POST")
-        def route_save_signs(request):
-            global favsign_list
-            try:
-                body_str = request.body.decode("utf-8") if request.body else ""
-                selected = []
-                aliases_new = {}
-                pct_map = [
-                    ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
-                    ("%3A",":"),("%5B","["),("%5D","]"),("%2D","-"),
-                    ("%2E","."),("%27","'"),("%21","!"),("%40","@"),
-                    ("%23","#"),("%24","$"),("%26","&"),("%3D","="),
-                    ("%3F","?"),("%20"," "),("%25","%"),
-                    ("%2B","+"),
-                ]
-                def pct_decode(s):
-                    s = s.replace("+", " ")
-                    for code, char in pct_map:
-                        s = s.replace(code, char).replace(code.lower(), char)
-                    return s
-
-                for part in body_str.split("&"):
-                    if part.startswith("fav="):
-                        name = pct_decode(part[4:])
-                        if name:
-                            selected.append(name)
-                    elif part.startswith("alias_"):
-                        # alias_<percent-encoded sign name>=<value>
-                        eq = part.find("=")
-                        if eq > 6:
-                            raw_key = pct_decode(part[6:eq])
-                            raw_val = pct_decode(part[eq+1:]).strip()
-                            if raw_key and raw_val:
-                                aliases_new[raw_key] = raw_val
-
-                ok = save_favorite_signs(selected, aliases_new)
-                favsign_list = selected  # Update live list immediately
-                status = "Saved " + str(len(selected)) + " favorite sign(s)."
-                if aliases_new:
-                    status += " " + str(len(aliases_new)) + " alias(es) saved."
-                cls = "status-ok" if ok else "status-err"
-                print(f"Favorites saved: {len(selected)} signs, {len(aliases_new)} aliases ok={ok}")
-            except Exception as e:
-                status = "Error: " + str(e)
-                cls = "status-err"
-                log_exception(e)
-
-            body = (
-                html_head("Signs Saved") +
-                "<body>" + html_nav("signs") +
-                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
-                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
-                "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
-                "</div></body></html>"
-            )
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── POST /calibrate — Light panels with numbers, show color picker ──
-        @server.route("/calibrate", "POST")
-        def route_calibrate(request):
-            global _calib_state
-            _calib_state["active"] = True
-
-            # Calibration ONLY works correctly when color_order is RGB.
-            # Read from settings dict (always current) not the module-level
-            # color_order variable which may be stale after a settings save.
-            current_order = settings.get("color_order", "RGB")
-            calib_needs_reset = (current_order != "RGB")
-            print(f"Calibration: current color_order={current_order} needs_reset={calib_needs_reset}")
-            if calib_needs_reset:
-                settings["color_order"] = "RGB"
-                save_settings(settings)
-                print("Calibration: temporarily set color_order=RGB for accurate test.")
-                print("Board must reboot to apply — rebooting now.")
-                body = (
-                    html_head("Calibration — Rebooting...") +
-                    "<body>" + html_nav("settings") +
-                    "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
-                    "<div class=\"card\">"
-                    "<p style=\"color:#ffaa00\"><strong>Rebooting with neutral color order...</strong></p>"
-                    "<p style=\"color:#aaa\">The board is restarting. This page will automatically "
-                    "redirect to calibration when the board is back online.</p>"
-                    "<p id=\"status\" style=\"color:#888\">&#x23F3; Waiting for board...</p>"
-                    "<script>"
-                    "function tryReconnect(){"
-                    "  fetch('/').then(function(r){"
-                    "    if(r.ok){window.location='/settings';}"
-                    "    else{setTimeout(tryReconnect,2000);}"
-                    "  }).catch(function(){setTimeout(tryReconnect,2000);})"
-                    "}"
-                    "setTimeout(tryReconnect,6000);"
-                    "</script>"
-                    "</div></body></html>"
-                )
-                # Set flag — main loop handles the actual reboot after response flushes
-                _reboot_pending[0] = True
-                return Response(request, content_type="text/html",
-                              headers={"Connection":"close"}, body=body)
-            try:
-                import displayio
-
-                # 5x7 pixel digit bitmaps for 1, 2, 3
-                # Each is a list of (col, row) pixel offsets to SET (foreground)
-                DIGITS = {
-                    "1": [(2,0),(1,1),(2,1),(2,2),(2,3),(2,4),(2,5),(2,6)],
-                    "2": [(1,0),(2,0),(3,0),(0,1),(3,1),(3,2),(2,3),(1,4),(0,5),(0,6),(1,6),(2,6),(3,6)],
-                    "3": [(0,0),(1,0),(2,0),(3,0),(3,1),(3,2),(1,2),(2,2),(3,3),(3,4),(0,5),(3,5),(1,6),(2,6)],
-                }
-
-                display = matrixportal.display
-                panel_w = width // 3
-
-                # 4 palette entries: bg colors + white for digit
-                # 0=dim red, 1=dim green, 2=dim blue, 3=white digit
-                bmp = displayio.Bitmap(width, height, 4)
-                pal = displayio.Palette(4)
-                pal[0] = 0x0D0000  # very dim red   — panel 1 (safe current)
-                pal[1] = 0x000D00  # very dim green — panel 2 (safe current)
-                pal[2] = 0x00000D  # very dim blue  — panel 3 (safe current)
-                pal[3] = 0x0D0D0D  # very dim white — digit pixels
-
-                # Fill panel background colors
-                for y in range(height):
-                    for x in range(width):
-                        bmp[x, y] = 0 if x < panel_w else (1 if x < panel_w * 2 else 2)
-
-                # Draw digit for each panel, centered within that panel
-                for panel_idx, digit in enumerate(["1", "2", "3"]):
-                    panel_start_x = panel_idx * panel_w
-                    # Center the 5x7 digit within the 64x32 panel
-                    digit_x = panel_start_x + (panel_w - 5) // 2
-                    digit_y = (height - 7) // 2
-                    for (dx, dy) in DIGITS[digit]:
-                        px = digit_x + dx
-                        py = digit_y + dy
-                        if 0 <= px < width and 0 <= py < height:
-                            bmp[px, py] = 3  # white digit pixel
-
-                tg = displayio.TileGrid(bmp, pixel_shader=pal)
-                splash = displayio.Group()
-                splash.append(tg)
-                display.root_group = splash
-                w.feed()
-            except Exception as disp_err:
-                print(f"Calibration display error: {disp_err}")
-                log_exception(disp_err)
-
-            # Web UI — panels now labeled P1/P2/P3 to match numbers on display
-            rows = ""
-            panels = [("P1","0d0000","1"),("P2","000d00","2"),("P3","00000d","3")]
-            for name, swatch, num in panels:
-                btns = ""
-                for c, lbl, cls in [("R","Red","btn-red"),("G","Green","btn-green"),("B","Blue","btn-blue")]:
-                    btns += (
-                        "<button class=\"" + cls + " color-btn\" type=\"button\" "
-                        "onclick=\"pick('" + name + "','" + c + "',this)\">" + lbl + "</button>"
-                    )
-                rows += (
-                    "<td>"
-                    "<div class=\"swatch\" style=\"background:#" + swatch + ";"
-                    "font-size:28px;font-weight:bold;color:#aaa;line-height:60px;\">" + num + "</div>"
-                    "<strong>Panel " + num + "</strong><br>"
-                    "<small style=\"color:#ffaa00\">What color do you see?</small><br><br>"
-                    + btns +
-                    "<div id=\"sel_" + name + "\" style=\"margin-top:6px;color:#ffaa00;\"></div></td>"
-                )
-
-            body = (
-                html_head("RGB Calibration") +
-                "<body>" + html_nav("settings") +
-                "<h1>&#x1F3A8; RGB Calibration</h1>" + html_meta() +
-                "<div class=\"card\">"
-                "<p style=\"color:#aaa\">Your display shows 3 panels each lit a different "
-                "dim color, numbered 1, 2, and 3.</p>"
-                "<p style=\"color:#ffaa00\"><strong>For each panel number below, click the "
-                "color you see glowing on your physical display for that panel.</strong><br>"
-                "Do not click what you expect to see — click only what you actually see.</p>"
-                "<form method=\"POST\" action=\"/calibrate-result\" id=\"calform\">"
-                "<input type=\"hidden\" name=\"p1\" id=\"v_P1\">"
-                "<input type=\"hidden\" name=\"p2\" id=\"v_P2\">"
-                "<input type=\"hidden\" name=\"p3\" id=\"v_P3\">"
-                "<table class=\"calib\"><tr>" + rows + "</tr></table><br>"
-                "<button class=\"btn-green\" type=\"submit\" id=\"applybtn\" disabled "
-                "style=\"font-size:1.1em;padding:10px 30px;\">&#x2713; Apply Color Order</button>"
-                "<a href=\"/calibrate-cancel\"><button class=\"btn-gray\" type=\"button\" "
-                "style=\"margin-left:10px;\">Cancel</button></a>"
-                "</form></div>"
-                "<script>"
-                "var picks={};"
-                "function pick(panel,color,btn){"
-                "picks[panel]=color;"
-                "document.getElementById('v_'+panel).value=color;"
-                "var cell=btn.parentNode;"
-                "var btns=cell.querySelectorAll('button');"
-                "for(var i=0;i<btns.length;i++){btns[i].style.opacity='0.4';}"
-                "btn.style.opacity='1';btn.style.outline='2px solid #fff';"
-                "document.getElementById('sel_'+panel).textContent='Selected: '+color;"
-                "if(picks['P1']&&picks['P2']&&picks['P3']){"
-                "document.getElementById('applybtn').disabled=false;}}"
-                "</script>"
-                "</body></html>"
-            )
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── GET /calibrate-cancel — Restore display and go back to settings ─
-        @server.route("/calibrate-cancel", GET)
-        def route_calibrate_cancel(request):
-            global _calib_state
-            _calib_state["active"] = False
-            try:
-                matrixportal.display.root_group = matrixportal.splash
-                print("Calibration cancelled — display restored.")
-            except Exception as e:
-                print(f"Display restore error: {e}")
-            body = (
-                html_head("Calibration Cancelled") +
-                "<body>" + html_nav("settings") +
-                "<h1>&#x2699;&#xFE0F; Settings</h1>" + html_meta() +
-                "<div class=\"card\"><p style=\"color:#aaa\">Calibration cancelled. Display restored.</p>"
-                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
-                "</div></body></html>"
-            )
-            return Response(request, content_type="text/html",
-                          headers={"Connection":"close"}, body=body)
-
-        # ── POST /calibrate-result ────────────────────────────────────────
-        @server.route("/calibrate-result", "POST")
-        def route_calibrate_result(request):
-            global _calib_state
-            _calib_state["active"] = False
-            try:
-                matrixportal.display.root_group = matrixportal.splash
-            except Exception:
-                pass
-            try:
-                p = parse_post_body(request)
-                print("Calibration POST body: " + str(p))  # Debug
-                p1 = p.get("p1", "R").upper()
-                p2 = p.get("p2", "G").upper()
-                p3 = p.get("p3", "B").upper()
-                print(f"Calibration: P1={p1} P2={p2} P3={p3}")
-                # Board sent P1=R, P2=G, P3=B.
-                # User reports what they see on each numbered panel.
-                # Concatenating gives the correct color_order string.
-                order_str = p1 + p2 + p3
-                if order_str not in VALID_COLOR_ORDERS:
-                    raise ValueError("Invalid order: " + order_str)
-                settings["color_order"] = order_str
-                ok = save_settings(settings)
-                print(f"Calibration: P1={p1} P2={p2} P3={p3} -> {order_str} saved={ok}")
-                status = ("Color order set to <strong>" + order_str + "</strong>. " +
-                          ("Saved! Reboot to apply." if ok else "Save failed."))
-                cls = "status-ok" if ok else "status-err"
-            except Exception as e:
-                status = "Calibration error: " + str(e)
-                cls = "status-err"
-                log_exception(e)
-
-            body = (
-                html_head("Calibration Complete") +
-                "<body>" + html_nav("settings") +
-                "<h1>&#x1F3A8; Calibration Complete</h1>" + html_meta() +
-                "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
-                "<a href=\"/settings\"><button class=\"btn-gray\">&#x2190; Back to Settings</button></a>"
-                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
-                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Now</button>"
-                "</form></div></body></html>"
-            )
-            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
-
-        # ── GET /export-settings — Serve settings bundle for sync ───────
-        @server.route("/export-settings", GET)
-        def route_export_settings(request):
-            try:
-                with open(SETTINGS_FILE, "r") as f:
-                    settings_data = f.read()
-            except Exception:
-                settings_data = "{}"
-            try:
-                with open(SIGNS_FILE, "r") as f:
-                    signs_data = f.read()
-            except Exception:
-                signs_data = '{"favorites":[]}'
-            bundle = json.dumps({
-                "settings": json.loads(settings_data),
-                "signs":    json.loads(signs_data),
-                "source_ip": str(wifi.radio.ipv4_address),
-                "source_version": LOCAL_VERSION
-            })
-            print(f"Export requested by {request.client_address}")
-            return Response(request, content_type="application/json",
-                          headers={"Connection":"close"}, body=bundle)
-
-        # ── GET /sync — Sync UI page ──────────────────────────────────────
-        @server.route("/sync", GET)
-        def route_sync_page(request):
-            body = (
-                html_head("Matrix Portal S3 - Sync") +
-                "<body>" + html_nav("sync") +
-                "<h1>&#x1F4E1; Sync from Another Unit</h1>" + html_meta() +
-                "<div class=\"card\">"
-                "<p style=\"color:#aaa\">Enter the IP address of the source unit "
-                "and select which files to sync. Your current files will be overwritten.</p>"
-                "<form method=\"POST\" action=\"/sync-from\">"
-                "<div class=\"row\">"
-                "<label>Source IP:</label>"
-                "<input type=\"text\" name=\"source_ip\" placeholder=\"192.168.x.x\" "
-                "style=\"width:160px\" required>"
-                "</div><br>"
-                "<div class=\"row\">"
-                "<label style=\"min-width:0\">"
-                "<input type=\"checkbox\" name=\"sync_settings\" value=\"1\" checked> "
-                "Sync <strong>settings.json</strong> "
-                "<span style=\"color:#888\">(color, timing, display settings)</span>"
-                "</label>"
-                "</div>"
-                "<div class=\"row\" style=\"margin-top:8px\">"
-                "<label style=\"min-width:0\">"
-                "<input type=\"checkbox\" name=\"sync_signs\" value=\"1\" checked> "
-                "Sync <strong>signs.json</strong> "
-                "<span style=\"color:#888\">(favorite sign list)</span>"
-                "</label>"
-                "</div><br>"
-                "<button class=\"btn-cyan\" type=\"submit\">&#x1F4E1; Sync Now</button>"
-                "</form></div>"
-                "<div class=\"card\">"
-                "<h2>Export This Unit</h2>"
-                "<p style=\"color:#aaa\">Other units can sync from this one at:</p>"
-                "<p><strong style=\"color:#00ccff\">http://" + str(wifi.radio.ipv4_address) + "/export-settings</strong></p>"
-                "</div>"
-                "</body></html>"
-            )
-            return Response(request, content_type="text/html",
-                          headers={"Connection":"close"}, body=body)
-
-        # ── POST /sync-from — Fetch and apply settings from another unit ──
-        @server.route("/sync-from", "POST")
-        def route_sync_from(request):
-            p = parse_post_body(request)
-            source_ip = p.get("source_ip", "").strip()
-            do_settings = p.get("sync_settings", "") == "1"
-            do_signs    = p.get("sync_signs", "")    == "1"
-
-            if not source_ip:
-                body = (html_head("Sync Error") + "<body>" + html_nav("sync") +
-                        "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
-                        "<div class=\"card\"><p class=\"status-err\">No source IP provided.</p>"
-                        "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
-                        "</div></body></html>")
-                return Response(request, content_type="text/html",
-                              headers={"Connection":"close"}, body=body)
-
-            print(f"Sync requested from {source_ip} settings={do_settings} signs={do_signs}")
-            matrixportal.set_text_color(dim(0x00FFFF), 0)
-            matrixportal.set_text(center_multiline_string("SYNCING\nFROM\n" + source_ip, characters_per_line), 0)
-            w.feed()
-
-            status_lines = []
-            cls = "status-ok"
-            sync_resp = None
-            try:
-                url = "http://" + source_ip + "/export-settings"
-                sync_resp = requests.get(url, timeout=10)
-                w.feed()
-                if sync_resp.status_code != 200:
-                    raise RuntimeError("HTTP " + str(sync_resp.status_code))
-
-                bundle = json.loads(sync_resp.text)
-                sync_resp.close()
-                sync_resp = None
-                w.feed()
-
-                source_ver = bundle.get("source_version", "?")
-                status_lines.append("Connected to v" + source_ver + " at " + source_ip)
-
-                if do_settings and "settings" in bundle:
-                    ok = save_settings(bundle["settings"])
-                    if ok:
-                        # Reload settings into memory
-                        loaded = load_settings()
-                        settings.update(loaded)
-                        sign_text_color[0] = color_for_display(settings.get("sign_text_color","#F7B500"))
-                        sign_name_color[0] = color_for_display(settings.get("sign_name_color","#0000FF"))
-                        matrixportal.set_text_color(dim(sign_text_color[0]), 0)
-                        status_lines.append("&#x2713; settings.json synced")
-                    else:
-                        status_lines.append("&#x2717; settings.json save failed")
-                        cls = "status-err"
-
-                if do_signs and "signs" in bundle:
-                    ok = save_favorite_signs(bundle["signs"].get("favorites", []))
-                    if ok:
-                        favsign_list.clear()
-                        favsign_list.extend(bundle["signs"].get("favorites", []))
-                        status_lines.append("&#x2713; signs.json synced ("
-                                           + str(len(favsign_list)) + " favorites)")
-                    else:
-                        status_lines.append("&#x2717; signs.json save failed")
-                        cls = "status-err"
-
-                if not do_settings and not do_signs:
-                    status_lines.append("Nothing selected to sync.")
-                    cls = "status-err"
-
-            except Exception as e:
-                status_lines.append("Sync error: " + str(e))
-                cls = "status-err"
-                log_exception(e)
-            finally:
-                if sync_resp is not None:
-                    try:
-                        sync_resp.close()
-                    except Exception:
-                        pass
-                gc.collect()
-
-            matrixportal.set_text_color(dim(sign_text_color[0]), 0)
-            matrixportal.set_text("", 0)
-
-            status_html = "<br>".join(status_lines)
-            body = (
-                html_head("Sync Complete") +
-                "<body>" + html_nav("sync") +
-                "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
-                "<div class=\"card\"><p class=\"" + cls + "\">" + status_html + "</p>"
-                "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back to Sync</button></a>"
-                "&nbsp;<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
-                "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot to Apply</button>"
-                "</form></div></body></html>"
-            )
-            return Response(request, content_type="text/html",
-                          headers={"Connection":"close"}, body=body)
-
-        server.start("0.0.0.0", port=80)
-        print(f"Web server active at http://{wifi.radio.ipv4_address}/")
-    except Exception as e:
-        print(f"Web server start failed: {e}")
-        log_exception(e)
-        HAS_HTTPSERVER = False
-
-# --- Load Favorite Signs List ---
-favsign_list = load_favorite_signs()
-if favsign_list:
-    print(f"Loaded {len(favsign_list)} favorite sign(s) from signs.json.")
-else:
-    print("No favorite signs loaded (signs.json missing or empty).")
-    print("Visit the Traffic Signs tab on the web UI to select signs.")
-
-# --- Main Loop ---
-cycles = 0
-w.feed()
-
-while True:
-    cycles += 1
-    print(f"\n{'*' * 48}")
-    print(f"Cycle #{cycles}  Free RAM: {gc.mem_free()} bytes")
-    print(f"{'*' * 48}")
-    w.feed()
-    gc.collect()
-
-    # Recreate the requests session every cycle to flush SSL/socket buffers.
-    # The first HTTPS request accumulates ~800KB of SSL state that doesn't
-    # fully release. Recreating each cycle keeps memory stable.
-    if cycles > 1 and pool is not None:
-        try:
-            ssl_context = ssl.create_default_context()
-            try:
-                ssl_context.load_verify_locations(cadata="")
-            except Exception:
-                pass
-            requests = adafruit_requests.Session(pool, ssl_context)
-            gc.collect()
-        except Exception as _sess_err:
-            print(f"Session refresh failed: {_sess_err}")
-
-    # Handle pending sign cache refresh (queued by web UI)
-    if _reboot_pending[0]:
-        _reboot_pending[0] = False
-        print("Rebooting as requested by web UI...")
-        time.sleep(0.5)  # Let any in-flight TCP data finish
-        import supervisor
-        supervisor.reload()
-
-    if _refresh_cache_pending[0]:
-        _refresh_cache_pending[0] = False
-        if wifi.radio.connected and requests is not None:
-            refresh_signs_cache_from_api()
-            # Recreate session after cache refresh to flush SSL state before
-            # the regular fetch. Also skip the regular fetch this cycle since
-            # we just pulled all sign data from the API anyway.
-            try:
-                requests = adafruit_requests.Session(pool, ssl_context)
-                gc.collect()
-                gc.collect()
-            except Exception:
-                pass
-            print("Cache refresh complete — skipping regular fetch this cycle.")
-            safe_delay(cycle_sleep_secs)
-            continue
-        else:
-            print("Cache refresh skipped — no network.")
-
-    # Handle ID flash request — alternates colors on the display so you know which unit this is
-    if _id_flash_pending[0]:
-        _id_flash_pending[0] = False
-        unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
-        print(f"ID flash: displaying {unit_label!r}")
-        flash_colors = [COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED,
-                        COLOR_YELLOW, COLOR_CYAN, COLOR_GREEN, COLOR_AMBER, COLOR_RED]
-        for fc in flash_colors:
-            w.feed()
-            matrixportal.set_text_color(dim(fc), 0)
-            matrixportal.set_text(center_multiline_string(unit_label, characters_per_line), 0)
-            time.sleep(0.4)
-        # Restore display to blank so main loop resumes normally
-        matrixportal.set_text("", 0)
-        print("ID flash complete.")
-
-    # Reconnect WiFi if dropped
-    if not wifi.radio.connected:
-        print("WiFi dropped. Reconnecting...")
-        if not connect_wifi():
-            print("Reconnect failed. Retrying in 10s...")
-            safe_delay(10)
-            continue
-
-    # Check for API error flag — stop fetching until URL/key is fixed or rebooted
-    if _api_error[0]:
-        matrixportal.set_text_color(dim(COLOR_RED), 0)
-        matrixportal.set_text(center_multiline_string(_api_error[0], characters_per_line), 0)
-        safe_delay(cycle_sleep_secs)
-        continue
-
-    # Fetch NY511 API data
-    print("Fetching NY511 API data...")
-    response = None
-    json_data = None
-    matched_signs = []  # Only store the signs we actually need to display
-    try:
-        poll_server()  # Service web requests before API fetch
-
-        # Poll rapidly while waiting for API response — this is the longest
-        # blocking call and most likely time for a browser to connect
-        _fetch_done = [False]
-        response = requests.get(NY511_URL, timeout=15)
-        w.feed()
-
-        # Drain any pending web requests immediately after fetch completes
-        for _ in range(5):
-            poll_server()
-        gc.collect()
-
-        if response.status_code == 401 or response.status_code == 403:
-            # Bad API key — set error flag and stop fetching
-            _api_error[0] = "BAD\nAPI KEY"
-            print(f"API rejected key: HTTP {response.status_code}. Stopping fetches.")
-            matrixportal.set_text_color(dim(COLOR_RED), 0)
-            matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
-            try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-            safe_delay(cycle_sleep_secs)
-            continue
-
-        if response.status_code == 404:
-            # Bad URL
-            _api_error[0] = "BAD\nAPI URL"
-            print(f"API URL not found: HTTP 404. Stopping fetches.")
-            matrixportal.set_text_color(dim(COLOR_RED), 0)
-            matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
-            try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-            safe_delay(cycle_sleep_secs)
-            continue
-
-        if response.status_code == 200:
-            print("API fetch successful. Parsing JSON...")
-            json_data = response.json()
-            w.feed()
-
-            # Close response immediately after parsing to free socket buffer RAM
-            try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-
-            poll_server()  # Service web requests after JSON parse
-
-            if isinstance(json_data, list):
-                sign_count = len(json_data)
-                print(f"Loaded {sign_count} signs from API.")
-                print("Extracting favorites...")
-
-                # Extract only matching signs into a small list, then free the full dataset
-                fav_set = set(favsign_list)
-                use_friendly = settings.get("use_friendly_names", True)
-                sign_aliases = load_sign_aliases() if use_friendly else {}
-                for sign in json_data:
-                    if "Name" in sign and "Messages" in sign and sign["Name"] in fav_set:
-                        ny511_name = sign["Name"]
-                        display_name = sign_aliases.get(ny511_name, ny511_name) if use_friendly else ny511_name
-                        matched_signs.append({
-                            "name": display_name,
-                            "msg": sign["Messages"]
-                        })
-
-                # Free the full 928-sign JSON list NOW before display loops
-                json_data = None
-                gc.collect()
-                gc.collect()  # Double-collect — CircuitPython sometimes needs two passes
-                print(f"Matched {len(matched_signs)} sign(s). Free RAM after GC: {gc.mem_free()}")
-
-                poll_server()  # Service web requests before display loop
-
-                for match in matched_signs:
-                    if _reboot_pending[0]:
-                        break  # Reboot requested — stop cycling signs immediately
-                    w.feed()
-                    print(f"\nMATCH: {match['name']}")
-                    display_sign(match, name_disp_secs, page_disp_secs)
-            else:
-                print(f"Unexpected API response type: {type(json_data)}")
-        else:
-            print(f"API returned HTTP {response.status_code}")
-
-    except Exception as e:
-        print(f"API/display error: {e}")
-        log_exception(e)
-    finally:
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-        json_data = None
-        matched_signs = None
-        gc.collect()
-        gc.collect()
-        gc.collect()  # Three passes — SSL buffers sometimes need extra cycles
-
-    print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
-    safe_delay(cycle_sleep_secs)
+                print("Settings saved: order=" +
