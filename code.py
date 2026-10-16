@@ -76,7 +76,7 @@ v2.2.78 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.78"
+LOCAL_VERSION = "2.2.80"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -519,11 +519,22 @@ def load_signs_cache():
 
 def save_signs_cache(sign_data):
     """Save sign data to signs_cache.json atomically.
-    sign_data: list of {"id","name","roadway"} dicts."""
+    Writes incrementally (one sign at a time) rather than building a single
+    large json.dumps() string. The full direct-511NY payload fragments the
+    heap badly (MicroPython's GC frees but does NOT defragment), so one big
+    contiguous allocation can fail even with plenty of total free RAM. Small
+    per-sign writes fit in the fragmented free holes where a big string won't."""
     tmp = SIGNS_CACHE_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
-            f.write(json.dumps({"signs": sign_data}))
+            f.write('{"signs":[')
+            first = True
+            for s in sign_data:
+                if not first:
+                    f.write(",")
+                first = False
+                f.write(json.dumps(s))
+            f.write("]}")
         try:
             os.remove(SIGNS_CACHE_FILE)
         except OSError:
@@ -2439,16 +2450,26 @@ while True:
     if _refresh_cache_pending[0]:
         _refresh_cache_pending[0] = False
         if wifi.radio.connected and requests is not None:
-            refresh_signs_cache_from_api()
-            try:
-                requests = adafruit_requests.Session(pool, ssl_context)
-                gc.collect()
-                gc.collect()
-            except Exception:
-                pass
-            print("Cache refresh complete — skipping regular fetch this cycle.")
-            safe_delay(cycle_sleep_secs)
-            continue
+            ok_cache = refresh_signs_cache_from_api()
+            gc.collect()
+            gc.collect()
+            if ok_cache:
+                # Parsing the full direct-511NY payload fragments the heap
+                # (MicroPython GC does not defragment), which can cause later
+                # allocation failures / spontaneous reboots. Reload now to
+                # return to a clean heap. The cache file persists across the
+                # reload, so favorite selection and fetching run reliably.
+                print("Cache refresh complete — reloading to clear heap.")
+                matrixportal.set_text_color(dim(COLOR_GREEN), 0)
+                matrixportal.set_text(center_multiline_string(
+                    "SIGNS\nCACHED", characters_per_line), 0)
+                safe_delay(2)
+                import supervisor
+                supervisor.reload()
+            else:
+                print("Cache refresh failed — continuing without reload.")
+                safe_delay(cycle_sleep_secs)
+                continue
         else:
             print("Cache refresh skipped — no network.")
 
