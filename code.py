@@ -60,10 +60,23 @@ v2.2.77 changes:
   longer hangs on a stale screen (e.g. the boot unit name). It now shows an
   amber "No Favorites / Selected" (nothing chosen) or "Favorites / Not Found"
   (chosen IDs absent from the feed), self-correcting on the next cycle.
+
+v2.2.78 changes:
+- Favorites now MERGE across views. Previously, saving on a filtered /signs
+  page (one roadway, a search, or the favorites view) replaced the entire
+  favorites list with only what was visible, silently wiping selections made
+  on other roadways. Each page now submits a hidden list of the signs it
+  showed; save keeps favorites from other views and applies only the
+  checked/unchecked state of the current view. Aliases merge the same way.
+- Performance / lockout fix: when NO favorites are selected, the main loop now
+  SKIPS the full-feed fetch entirely (it was downloading and parsing ~1000+
+  signs every cycle for nothing, starving the web server and making the UI
+  nearly unreachable). It shows the amber prompt and keeps the web UI
+  responsive; fetching resumes automatically once favorites are saved.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.77"
+LOCAL_VERSION = "2.2.78"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -1744,8 +1757,12 @@ if HAS_HTTPSERVER and pool is not None:
                         'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
                         'font-family:monospace;" title="Friendly name shown on LED instead of the sign name">'
                     ) if sid in favs else ""
+                    # Hidden "shown" field lets the save handler know which signs
+                    # this view presented, so it can merge (not wipe) favorites
+                    # selected on other roadways/searches.
                     items_parts.append(
                         '<div class="sign-item' + fav_cls + '">'
+                        '<input type="hidden" name="shown" value="' + safe_id + '">'
                         '<label><input type="checkbox" name="fav" value="' +
                         safe_id + '"' + checked + '> ' + safe_name + '</label>'
                         + alias_input
@@ -1909,6 +1926,7 @@ if HAS_HTTPSERVER and pool is not None:
             try:
                 body_str = request.body.decode("utf-8") if request.body else ""
                 selected = []
+                shown = []
                 aliases_new = {}
                 pct_map = [
                     ("%2C",","),("%28","("),("%29",")"),("%2F","/"),
@@ -1929,6 +1947,10 @@ if HAS_HTTPSERVER and pool is not None:
                         sid = pct_decode(part[4:])
                         if sid:
                             selected.append(sid)
+                    elif part.startswith("shown="):
+                        sid = pct_decode(part[6:])
+                        if sid:
+                            shown.append(sid)
                     elif part.startswith("alias_"):
                         eq = part.find("=")
                         if eq > 6:
@@ -1937,13 +1959,34 @@ if HAS_HTTPSERVER and pool is not None:
                             if raw_key and raw_val:
                                 aliases_new[raw_key] = raw_val
 
-                ok = save_favorite_signs(selected, aliases_new)
-                favsign_list = selected
-                status = "Saved " + str(len(selected)) + " favorite sign(s)."
+                # --- MERGE favorites across views ---
+                # Start from the existing saved favorites. Remove any that were
+                # shown on THIS page (so deselections take effect), then add the
+                # ones checked on this page. Favorites from other roadways/
+                # searches that weren't shown here are left untouched.
+                old_favs = load_favorite_signs()
+                shown_set = set(shown)
+                merged = [f for f in old_favs if f not in shown_set]
+                for sid in selected:
+                    if sid not in merged:
+                        merged.append(sid)
+
+                # --- MERGE aliases the same way ---
+                old_aliases = load_sign_aliases()
+                for sid in shown_set:
+                    old_aliases.pop(sid, None)
+                old_aliases.update(aliases_new)
+
+                ok = save_favorite_signs(merged, old_aliases)
+                favsign_list = merged
+                added_here = len(selected)
+                status = ("Saved. " + str(len(merged)) + " total favorite sign(s) ("
+                          + str(added_here) + " selected on this view).")
                 if aliases_new:
-                    status += " " + str(len(aliases_new)) + " alias(es) saved."
+                    status += " " + str(len(aliases_new)) + " alias(es) updated."
                 cls = "status-ok" if ok else "status-err"
-                print(f"Favorites saved: {len(selected)} signs, {len(aliases_new)} aliases ok={ok}")
+                print(f"Favorites merged: {len(merged)} total, {added_here} on this view, "
+                      f"{len(shown_set)} shown, {len(aliases_new)} aliases ok={ok}")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
@@ -1955,6 +1998,7 @@ if HAS_HTTPSERVER and pool is not None:
                 "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
                 "<div class=\"card\"><p class=\"" + cls + "\">" + status + "</p>"
                 "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                " <a href=\"/signs-favorites\"><button class=\"btn-cyan\">&#x2B50; View All Favorites</button></a>"
                 "</div></body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
@@ -2436,6 +2480,18 @@ while True:
         safe_delay(cycle_sleep_secs)
         continue
 
+    # No favorites selected — skip the full-feed fetch entirely. Fetching and
+    # parsing ~1000+ signs every cycle for nothing starves the web server and
+    # can make the UI nearly unreachable. Just show the amber prompt and keep
+    # polling the web server so the user can pick favorites. Fetching resumes
+    # automatically next cycle once favsign_list is populated.
+    if not favsign_list:
+        print("No favorites selected — skipping fetch. Showing prompt.")
+        matrixportal.set_text_color(dim(COLOR_AMBER), 0)
+        matrixportal.set_text(center_multiline_string("No Favorites\nSelected", characters_per_line), 0)
+        safe_delay(cycle_sleep_secs)
+        continue
+
     print("Fetching 511NY signs data...")
     response = None
     json_data = None
@@ -2522,18 +2578,12 @@ while True:
                 poll_server()
 
                 if not matched_signs:
-                    # Nothing to show — don't leave a stale screen (e.g. the boot
-                    # unit name) hanging on the LED. Display an informative amber
-                    # state. The trailing cycle safe_delay keeps it up and polls
-                    # the web UI, so it self-corrects on the next cycle once the
-                    # user selects favorites.
-                    if not favsign_list:
-                        empty_msg = "No Favorites\nSelected"
-                    else:
-                        empty_msg = "Favorites\nNot Found"
-                    print("No matched signs — showing: " + empty_msg.replace("\n", " "))
+                    # Favorites are set but none appeared in the feed (bad IDs or
+                    # aged out). Don't leave a stale screen; show an amber notice.
+                    print("Favorites set but none found in feed — showing notice.")
                     matrixportal.set_text_color(dim(COLOR_AMBER), 0)
-                    matrixportal.set_text(center_multiline_string(empty_msg, characters_per_line), 0)
+                    matrixportal.set_text(center_multiline_string(
+                        "Favorites\nNot Found", characters_per_line), 0)
                 else:
                     for match in matched_signs:
                         if _reboot_pending[0]:
