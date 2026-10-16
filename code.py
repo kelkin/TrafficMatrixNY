@@ -54,10 +54,16 @@ v2.2.76 changes:
   sanitize of a previously-stored percent-encoded unit_name (e.g. "Bed%2BUnit").
 - New remote Factory Reset button (Settings > Danger Zone): wipes settings,
   favorites, aliases and cache to new-in-box state, preserving WiFi secrets.
+
+v2.2.77 changes:
+- Empty-state display: when no favorite signs match the API data, the LED no
+  longer hangs on a stale screen (e.g. the boot unit name). It now shows an
+  amber "No Favorites / Selected" (nothing chosen) or "Favorites / Not Found"
+  (chosen IDs absent from the feed), self-correcting on the next cycle.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.76"
+LOCAL_VERSION = "2.2.77"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -2515,12 +2521,26 @@ while True:
 
                 poll_server()
 
-                for match in matched_signs:
-                    if _reboot_pending[0]:
-                        break
-                    w.feed()
-                    print(f"\nMATCH: {match['name']}")
-                    display_sign(match, name_disp_secs, page_disp_secs)
+                if not matched_signs:
+                    # Nothing to show — don't leave a stale screen (e.g. the boot
+                    # unit name) hanging on the LED. Display an informative amber
+                    # state. The trailing cycle safe_delay keeps it up and polls
+                    # the web UI, so it self-corrects on the next cycle once the
+                    # user selects favorites.
+                    if not favsign_list:
+                        empty_msg = "No Favorites\nSelected"
+                    else:
+                        empty_msg = "Favorites\nNot Found"
+                    print("No matched signs — showing: " + empty_msg.replace("\n", " "))
+                    matrixportal.set_text_color(dim(COLOR_AMBER), 0)
+                    matrixportal.set_text(center_multiline_string(empty_msg, characters_per_line), 0)
+                else:
+                    for match in matched_signs:
+                        if _reboot_pending[0]:
+                            break
+                        w.feed()
+                        print(f"\nMATCH: {match['name']}")
+                        display_sign(match, name_disp_secs, page_disp_secs)
             else:
                 print(f"Unexpected API response type: {type(json_data)}")
         else:
