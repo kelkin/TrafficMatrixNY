@@ -1,0 +1,19 @@
+{
+  "version": "2.2.76",
+  "files": {
+    "code.py": "https://raw.githubusercontent.com/kelkin/TrafficMatrixNY/main/code.py",
+    "lib/adafruit_logging.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_Logging/main/adafruit_logging.py",
+    "lib/adafruit_ticks.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_Ticks/main/adafruit_ticks.py",
+    "lib/adafruit_httpserver/__init__.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/__init__.py",
+    "lib/adafruit_httpserver/authentication.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/authentication.py",
+    "lib/adafruit_httpserver/exceptions.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/exceptions.py",
+    "lib/adafruit_httpserver/headers.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/headers.py",
+    "lib/adafruit_httpserver/interfaces.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/interfaces.py",
+    "lib/adafruit_httpserver/methods.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/methods.py",
+    "lib/adafruit_httpserver/mime_types.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/mime_types.py",
+    "lib/adafruit_httpserver/request.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/request.py",
+    "lib/adafruit_httpserver/response.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/response.py",
+    "lib/adafruit_httpserver/route.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/route.py",
+    "lib/adafruit_httpserver/server.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/server.py",
+    "lib/adafruit_httpserver/status.py": "https://raw.githubusercontent.com/adafruit/Adafruit_CircuitPython_HTTPServer/main/adafruit_httpserver/status.py"
+  }
