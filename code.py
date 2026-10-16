@@ -914,7 +914,7 @@ def safe_delay(seconds):
     Exits early if _reboot_pending or _id_flash_pending is set."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
-       poll_server()
+        poll_server()
         if _reboot_pending[0]:
             return
         if _id_flash_pending[0]:
