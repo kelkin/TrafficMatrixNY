@@ -76,7 +76,7 @@ v2.2.78 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.80"
+LOCAL_VERSION = "2.2.81"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -395,57 +395,143 @@ def epoch_to_local_str(ms):
 SIGNS_FILE       = "signs.json"
 SIGNS_CACHE_FILE = "signs_cache.json"
 
+def _stream_parse_signs(resp_obj, on_sign, poll=False):
+    """Stream the HTTP body and call on_sign(dict) for each top-level sign
+    object, parsing ONE object at a time so peak RAM stays tiny even for the
+    full (fat) direct-511NY payload. A whole-payload resp.json() needs the raw
+    text AND the parse tree in RAM simultaneously (~1.5 MB) and MemoryErrors on
+    this board. We scan bytes, track string/escape/brace state, and json.loads
+    only each isolated object. Returns count parsed, or -1 on fatal error.
+    Byte-level scan is UTF-8 safe: the ASCII structural bytes (" \\ { }) never
+    collide with UTF-8 multi-byte sequences (all >= 0x80)."""
+    started = False
+    depth = 0
+    in_str = False
+    esc = False
+    capturing = False
+    buf = bytearray()
+    count = 0
+    since_feed = 0
+    try:
+        for chunk in resp_obj.iter_content(1024):
+            if not chunk:
+                continue
+            for b in chunk:
+                if not started:
+                    if b == 91:  # '['  enter top-level array
+                        started = True
+                    continue
+                if in_str:
+                    if capturing:
+                        buf.append(b)
+                    if esc:
+                        esc = False
+                    elif b == 92:  # backslash
+                        esc = True
+                    elif b == 34:  # closing quote
+                        in_str = False
+                    continue
+                if b == 34:  # opening quote
+                    if capturing:
+                        buf.append(b)
+                    in_str = True
+                    continue
+                if b == 123:  # '{'
+                    if depth == 0:
+                        capturing = True
+                        buf = bytearray()
+                    depth += 1
+                    if capturing:
+                        buf.append(b)
+                    continue
+                if b == 125:  # '}'
+                    if capturing:
+                        buf.append(b)
+                    depth -= 1
+                    if depth == 0 and capturing:
+                        try:
+                            on_sign(json.loads(bytes(buf).decode("utf-8")))
+                            count += 1
+                        except Exception:
+                            pass
+                        capturing = False
+                        buf = bytearray()
+                        since_feed += 1
+                        if since_feed >= 25:
+                            since_feed = 0
+                            w.feed()
+                            if poll:
+                                poll_server()
+                    continue
+                if capturing:
+                    buf.append(b)
+            w.feed()
+            if poll:
+                poll_server()
+        return count
+    except Exception as e:
+        print("stream parse error: " + str(e))
+        log_exception(e)
+        return -1
+      
 def refresh_signs_cache_from_api():
-    """Fetch all signs from the API and save a slim cache (id/name/roadway)."""
+    """Stream all signs from the API and save a slim cache (id/name/roadway).
+    Uses _stream_parse_signs so the full fat direct payload never has to be
+    held in RAM at once (which MemoryErrors on this board)."""
     print("Fetching NY511 sign cache...")
     matrixportal.set_text_color(dim(0x00FFFF), 0)
     matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
     w.feed()
 
     resp_obj = None
+    sign_data = []
     try:
-        resp_obj = requests.get(NY511_URL, timeout=20)
+        resp_obj = requests.get(NY511_URL, timeout=30)
         w.feed()
         if resp_obj.status_code != 200:
-            print(f"NY511 cache fetch failed: HTTP {resp_obj.status_code}")
+            print("NY511 cache fetch failed: HTTP " + str(resp_obj.status_code))
             return False
 
-        api_data = resp_obj.json()
-        w.feed()
-        resp_obj.close()
-        resp_obj = None
-
-        if not isinstance(api_data, list):
-            print("NY511 cache: unexpected response format")
-            return False
-
-        sign_data = []
-        for sign in api_data:
-            w.feed()  # Feed watchdog while iterating signs
+        def _collect(sign):
             sid = sign.get("id")
             if not sid:
-                continue
-            name = sign.get("name", sid)
+                return
             loc = sign.get("location") or {}
-            roadway = loc.get("routeId", "")
-            sign_data.append({"id": sid, "name": name, "roadway": roadway})
+            sign_data.append({
+                "id": sid,
+                "name": sign.get("name", sid),
+                "roadway": loc.get("routeId", ""),
+            })
+
+        parsed = _stream_parse_signs(resp_obj, _collect, poll=False)
+        w.feed()
+        try:
+            resp_obj.close()
+        except Exception:
+            pass
+        resp_obj = None
+        gc.collect()
+
+        if parsed < 0:
+            print("NY511 cache: stream parse failed")
+            return False
+        if not sign_data:
+            print("NY511 cache: no signs parsed (unexpected format?)")
+            return False
 
         sign_data.sort(key=lambda s: s["name"])
-        api_data = None
-        gc.collect()
         gc.collect()
 
         ok = save_signs_cache(sign_data)
-        print(f"NY511 cache: {len(sign_data)} signs saved={ok}")
+        print("NY511 cache: " + str(len(sign_data)) + " signs saved=" + str(ok))
 
         matrixportal.set_text_color(dim(0x00FF00), 0)
-        matrixportal.set_text(center_multiline_string(
-            "SIGNS\nCACHED", characters_per_line), 0)
+        matrixportal.set_text(center_multiline_string("SIGNS\nCACHED", characters_per_line), 0)
         safe_delay(2)
         return ok
 
     except Exception as e:
-        print(f"NY511 cache fetch error: {e}")
+        print("NY511 cache fetch error: " + str(e))
         log_exception(e)
         return False
     finally:
@@ -2514,21 +2600,17 @@ while True:
 
     print("Fetching 511NY signs data...")
     response = None
-    json_data = None
     matched_signs = []
     try:
         poll_server()
 
-        response = requests.get(NY511_URL, timeout=15)
+        response = requests.get(NY511_URL, timeout=30)
         w.feed()
+        code = response.status_code
 
-        for _ in range(5):
-            poll_server()
-        gc.collect()
-
-        if response.status_code == 401 or response.status_code == 403:
+        if code == 401 or code == 403:
             _api_error[0] = "BAD\nAPI KEY"
-            print(f"API rejected key: HTTP {response.status_code}. Stopping fetches.")
+            print("API rejected key: HTTP " + str(code) + ". Stopping fetches.")
             matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
             try:
@@ -2539,9 +2621,9 @@ while True:
             safe_delay(cycle_sleep_secs)
             continue
 
-        if response.status_code == 404:
+        if code == 404:
             _api_error[0] = "BAD\nAPI URL"
-            print(f"API URL not found: HTTP 404. Stopping fetches.")
+            print("API URL not found: HTTP 404. Stopping fetches.")
             matrixportal.set_text_color(dim(COLOR_RED), 0)
             matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
             try:
@@ -2552,72 +2634,59 @@ while True:
             safe_delay(cycle_sleep_secs)
             continue
 
-        if response.status_code == 200:
-            print("API fetch successful. Parsing JSON...")
-            json_data = response.json()
-            w.feed()
+        if code != 200:
+            print("API returned HTTP " + str(code))
+        else:
+            print("API fetch OK. Streaming + matching favorites...")
+            fav_set = set(favsign_list)
+            use_friendly = settings.get("use_friendly_names", True)
+            sign_aliases = load_sign_aliases() if use_friendly else {}
 
+            def _match(sign):
+                sid = sign.get("id")
+                if sid and sid in fav_set:
+                    ny_name = sign.get("name", sid)
+                    display_name = sign_aliases.get(sid, ny_name) if use_friendly else ny_name
+                    disp = sign.get("display") or {}
+                    props = sign.get("properties") or {}
+                    matched_signs.append({
+                        "id": sid,
+                        "name": display_name,
+                        "status": sign.get("status", ""),
+                        "pages": disp.get("pages", []),
+                        "dwell_ms": props.get("phaseDwellTime", 2500),
+                        "blank_ms": props.get("phaseBlankTime", 0),
+                        "last_updated": sign.get("lastUpdated", 0),
+                    })
+
+            parsed = _stream_parse_signs(response, _match, poll=True)
             try:
                 response.close()
             except Exception:
                 pass
             response = None
+            gc.collect()
+            gc.collect()
+            print("Parsed " + str(parsed) + " signs. Matched " + str(len(matched_signs))
+                  + ". Free RAM: " + str(gc.mem_free()))
 
             poll_server()
 
-            if isinstance(json_data, list):
-                sign_count = len(json_data)
-                print(f"Loaded {sign_count} signs from API.")
-                print("Extracting favorites...")
-
-                fav_set = set(favsign_list)  # set of sign IDs
-                use_friendly = settings.get("use_friendly_names", True)
-                sign_aliases = load_sign_aliases() if use_friendly else {}
-                for sign in json_data:
-                    sid = sign.get("id")
-                    if sid and sid in fav_set:
-                        ny_name = sign.get("name", sid)
-                        display_name = sign_aliases.get(sid, ny_name) if use_friendly else ny_name
-                        disp = sign.get("display") or {}
-                        props = sign.get("properties") or {}
-                        matched_signs.append({
-                            "id": sid,
-                            "name": display_name,
-                            "status": sign.get("status", ""),
-                            "pages": disp.get("pages", []),
-                            "dwell_ms": props.get("phaseDwellTime", 2500),
-                            "blank_ms": props.get("phaseBlankTime", 0),
-                            "last_updated": sign.get("lastUpdated", 0),
-                        })
-
-                json_data = None
-                gc.collect()
-                gc.collect()
-                print(f"Matched {len(matched_signs)} sign(s). Free RAM after GC: {gc.mem_free()}")
-
-                poll_server()
-
-                if not matched_signs:
-                    # Favorites are set but none appeared in the feed (bad IDs or
-                    # aged out). Don't leave a stale screen; show an amber notice.
-                    print("Favorites set but none found in feed — showing notice.")
-                    matrixportal.set_text_color(dim(COLOR_AMBER), 0)
-                    matrixportal.set_text(center_multiline_string(
-                        "Favorites\nNot Found", characters_per_line), 0)
-                else:
-                    for match in matched_signs:
-                        if _reboot_pending[0]:
-                            break
-                        w.feed()
-                        print(f"\nMATCH: {match['name']}")
-                        display_sign(match, name_disp_secs, page_disp_secs)
+            if not matched_signs:
+                print("Favorites set but none found in feed — showing notice.")
+                matrixportal.set_text_color(dim(COLOR_AMBER), 0)
+                matrixportal.set_text(center_multiline_string(
+                    "Favorites\nNot Found", characters_per_line), 0)
             else:
-                print(f"Unexpected API response type: {type(json_data)}")
-        else:
-            print(f"API returned HTTP {response.status_code}")
+                for match in matched_signs:
+                    if _reboot_pending[0]:
+                        break
+                    w.feed()
+                    print("\nMATCH: " + str(match["name"]))
+                    display_sign(match, name_disp_secs, page_disp_secs)
 
     except Exception as e:
-        print(f"API/display error: {e}")
+        print("API/display error: " + str(e))
         log_exception(e)
     finally:
         if response is not None:
@@ -2625,11 +2694,11 @@ while True:
                 response.close()
             except Exception:
                 pass
-        json_data = None
         matched_signs = None
         gc.collect()
         gc.collect()
         gc.collect()
 
-    print(f"Cycle complete. RAM: {gc.mem_free()} bytes. Waiting {cycle_sleep_secs}s...")
+    print("Cycle complete. RAM: " + str(gc.mem_free()) + " bytes. Waiting "
+          + str(cycle_sleep_secs) + "s...")
     safe_delay(cycle_sleep_secs)
