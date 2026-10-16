@@ -1,3 +1,4 @@
+# "code.py"
 # =============================================================================
 # Traffic Matrix NY — LED Highway Sign Display for Matrix Portal S3
 # =============================================================================
@@ -44,10 +45,19 @@ v2.2.75 changes (new 511NY signs API migration):
 - Blank / errored signs (status != DISPLAYING_MESSAGE) render "NO MESSAGE".
 - Optional Mode-2 "Data Last Update" screen shown before each sign's message,
   converted from epoch ms with automatic US-Eastern EST/EDT. Toggle in web UI.
+
+v2.2.76 changes:
+- Hardened sign-cache loader: malformed/old-schema cache rows (missing "id")
+  are skipped so a stale signs_cache.json can never crash the /signs page.
+- Stale (pre-2.2.75) sign cache auto-deleted on boot; click Refresh to rebuild.
+- Proper URL-decoding of unit_name/API fields on save, plus one-time boot
+  sanitize of a previously-stored percent-encoded unit_name (e.g. "Bed%2BUnit").
+- New remote Factory Reset button (Settings > Danger Zone): wipes settings,
+  favorites, aliases and cache to new-in-box state, preserving WiFi secrets.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.75"
+LOCAL_VERSION = "2.2.76"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -246,7 +256,41 @@ def color_for_display(hex_str):
     """Convert a hex color string to the integer needed by set_text_color()."""
     return hex_to_int(hex_str)
 
+def url_decode(s):
+    """Decode an application/x-www-form-urlencoded value:
+    '+' becomes space, then %XX hex escapes become their character.
+    Used for text fields submitted from the web UI (unit name, API URL, etc.)."""
+    if not s:
+        return s
+    s = s.replace("+", " ")
+    out = ""
+    i = 0
+    L = len(s)
+    while i < L:
+        c = s[i]
+        if c == "%" and i + 3 <= L:
+            try:
+                out += chr(int(s[i + 1:i + 3], 16))
+                i += 3
+                continue
+            except Exception:
+                pass
+        out += c
+        i += 1
+    return out
+
 settings = load_settings()
+
+# One-time sanitize: firmware prior to v2.2.76 could store unit_name without
+# URL-decoding, leaving percent escapes like "%2B" visible on the LED. Decode
+# once and re-save if it changed.
+_raw_unit_name = settings.get("unit_name", "")
+if "%" in _raw_unit_name:
+    _fixed_unit_name = url_decode(_raw_unit_name)
+    if _fixed_unit_name != _raw_unit_name:
+        settings["unit_name"] = _fixed_unit_name
+        save_settings(settings)
+        print("Sanitized unit_name: " + repr(_raw_unit_name) + " -> " + repr(_fixed_unit_name))
 
 # API URL and key — read from settings.json. New signs endpoint is public (no key).
 # api_key is retained only for the premium Worker path (which may use ?key=).
@@ -435,11 +479,22 @@ def save_favorite_signs(favorites_list, aliases_dict=None):
 
 def load_signs_cache():
     """Load sign cache from signs_cache.json.
-    Returns list of {"id","name","roadway"} dicts."""
+    Returns list of {"id","name","roadway"} dicts. Any malformed entry
+    (not a dict, or missing "id" — e.g. a pre-2.2.75 name-based cache) is
+    skipped so a stale cache can never crash the /signs page."""
     try:
         with open(SIGNS_CACHE_FILE, "r") as f:
             data = json.loads(f.read())
-        return data.get("signs", [])
+        raw = data.get("signs", [])
+        clean = []
+        for s in raw:
+            if isinstance(s, dict) and s.get("id"):
+                clean.append({
+                    "id": s.get("id"),
+                    "name": s.get("name", s.get("id")),
+                    "roadway": s.get("roadway", ""),
+                })
+        return clean
     except Exception:
         return []
 
@@ -1232,6 +1287,46 @@ if HAS_HTTPSERVER and pool is not None:
                           headers={"Location": "/rebooting", "Connection": "close"},
                           body="")
 
+        # ── POST /factory-reset ───────────────────────────────────────────
+        @server.route("/factory-reset", "POST")
+        def route_factory_reset(request):
+            print("FACTORY RESET requested via web UI.")
+            for _f in [SETTINGS_FILE, SIGNS_FILE, SIGNS_CACHE_FILE]:
+                try:
+                    os.remove(_f)
+                    print("  Deleted " + _f)
+                except OSError:
+                    pass
+            try:
+                matrixportal.set_text_color(dim(COLOR_AMBER), 0)
+                matrixportal.set_text(center_multiline_string("FACTORY\nRESET", characters_per_line), 0)
+            except Exception:
+                pass
+            _reboot_pending[0] = True
+            body = (
+                html_head("Factory Reset") +
+                "<body>" + html_nav("settings") +
+                "<h1>&#x1F6A8; Factory Reset</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p class=\"status-ok\">All custom settings, favorites, aliases, and the "
+                "sign cache have been erased. WiFi credentials were <strong>not</strong> "
+                "touched &mdash; the unit will rejoin your network automatically.</p>"
+                "<p style=\"color:#ffaa00\">&#x23F3; Rebooting to new-in-box state...</p>"
+                "<p id=\"status\" style=\"color:#888\">Waiting for board...</p>"
+                "<script>"
+                "function tryReconnect(){"
+                "  fetch('/').then(function(r){"
+                "    if(r.ok){window.location='/';}"
+                "    else{setTimeout(tryReconnect,2000);}"
+                "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                "}"
+                "setTimeout(tryReconnect,6000);"
+                "</script>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
+
         # ── POST /identify ────────────────────────────────────────────────
         @server.route("/identify", "POST")
         def route_identify(request):
@@ -1416,6 +1511,18 @@ if HAS_HTTPSERVER and pool is not None:
                 "<button class=\"btn-yellow\" type=\"submit\">&#x25B6; Start Calibration</button>"
                 "</form></div>"
 
+                # Danger Zone — Factory Reset
+                "<div class=\"card\" style=\"border:2px solid #cc2222\">"
+                "<h2 style=\"color:#ff5555\">&#x26A0;&#xFE0F; Danger Zone</h2>"
+                "<p style=\"color:#aaa\">Factory reset erases all custom settings, favorite "
+                "signs, aliases, and the sign cache, returning the unit to new-in-box state. "
+                "<strong style=\"color:#ccc\">WiFi credentials are preserved</strong>, so the "
+                "unit will reconnect automatically after rebooting.</p>"
+                "<form method=\"POST\" action=\"/factory-reset\" "
+                "onsubmit=\"return confirm('Erase ALL settings and favorites? This cannot be undone.');\">"
+                "<button class=\"btn-red\" type=\"submit\">&#x1F6A8; Factory Reset</button>"
+                "</form></div>"
+
                 "</body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
@@ -1434,20 +1541,12 @@ if HAS_HTTPSERVER and pool is not None:
                 new_order = p.get("color_order", settings.get("color_order", "RGB")).upper()
                 if new_order not in VALID_COLOR_ORDERS:
                     new_order = "RGB"
-                new_api_url = p.get("api_url", settings.get("api_url", "")).strip()
-                new_api_key = p.get("api_key", settings.get("api_key", "")).strip()
-                new_unit_name = p.get("unit_name", settings.get("unit_name", "")).strip()
+                new_api_url = url_decode(p.get("api_url", settings.get("api_url", ""))).strip()
+                new_api_key = url_decode(p.get("api_key", settings.get("api_key", ""))).strip()
+                new_unit_name = url_decode(p.get("unit_name", settings.get("unit_name", ""))).strip()
                 new_use_friendly = (p.get("use_friendly_names", "0") == "1")
                 new_show_ts = (p.get("show_timestamp", "0") == "1")
                 new_override_dwell = (p.get("override_api_dwell", "0") == "1")
-                for code, char in [("%3A",":"),("%2F","/"),("%3F","?"),("%3D","="),
-                                   ("%26","&"),("%23","#"),("%40","@"),("%2B"," "),
-                                   ("%20"," "),("%25","%"),("%2C",","),("%28","("),
-                                   ("%29",")"),("%2D","-"),("%2E","."),("%27","'"),
-                                   ("%21","!"),("%5F","_")]:
-                    new_api_url   = new_api_url.replace(code, char).replace(code.lower(), char)
-                    new_api_key   = new_api_key.replace(code, char).replace(code.lower(), char)
-                    new_unit_name = new_unit_name.replace(code, char).replace(code.lower(), char)
                 try:
                     new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
@@ -1565,16 +1664,16 @@ if HAS_HTTPSERVER and pool is not None:
             w.feed()
 
             if query == "__favorites__":
-                all_items = sorted([s for s in cached if s["id"] in favs],
-                                   key=lambda s: s["name"])
+                all_items = sorted([s for s in cached if s.get("id") in favs],
+                                   key=lambda s: s.get("name", ""))
             elif query.startswith("__roadway__:"):
                 rw = query[12:]
                 all_items = sorted([s for s in cached
                                     if s.get("roadway","").lower() == rw.lower()],
-                                   key=lambda s: s["name"])
+                                   key=lambda s: s.get("name", ""))
             elif query:
                 all_items = [s for s in cached if
-                             query in s["name"].lower() or
+                             query in s.get("name", "").lower() or
                              query in s.get("roadway", "").lower()]
             else:
                 all_items = None
@@ -1583,7 +1682,7 @@ if HAS_HTTPSERVER and pool is not None:
             if all_items is None:
                 items_html = ""
                 sign_count_text = str(len(cached)) + " signs cached."
-                fav_count = len([s for s in cached if s["id"] in favs])
+                fav_count = len([s for s in cached if s.get("id") in favs])
 
                 roadways = sorted(set(
                     s.get("roadway","").strip()
@@ -1620,8 +1719,8 @@ if HAS_HTTPSERVER and pool is not None:
                 for i, sign in enumerate(all_items):
                     if i % 50 == 0:
                         w.feed()
-                    sid  = sign["id"]
-                    name = sign["name"]
+                    sid  = sign.get("id", "")
+                    name = sign.get("name", sid)
                     checked = " checked" if sid in favs else ""
                     fav_cls = " fav" if sid in favs else ""
                     safe_name = (name.replace("&","&amp;").replace("<","&lt;")
@@ -2234,6 +2333,22 @@ if favsign_list and not all("*" in str(f) for f in favsign_list):
     print("Old-format (name-based) favorites detected. Resetting for new API.")
     save_favorite_signs([], {})
     favsign_list = []
+
+# Migration: a pre-2.2.75 signs_cache.json used a flat/name-based schema with
+# no "id" field. load_signs_cache() now skips malformed rows, but we also
+# physically delete a stale-schema cache so a clean one is fetched on Refresh.
+try:
+    with open(SIGNS_CACHE_FILE, "r") as _cf:
+        _cache_rows = json.loads(_cf.read()).get("signs", [])
+    if _cache_rows and not all(isinstance(s, dict) and s.get("id") for s in _cache_rows):
+        print("Old-format sign cache detected. Deleting — click Refresh to rebuild.")
+        try:
+            os.remove(SIGNS_CACHE_FILE)
+        except OSError:
+            pass
+    _cache_rows = None
+except Exception:
+    pass
 
 if favsign_list:
     print(f"Loaded {len(favsign_list)} favorite sign(s) from signs.json.")
