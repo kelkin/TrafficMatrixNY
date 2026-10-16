@@ -76,7 +76,7 @@ v2.2.78 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.81"
+LOCAL_VERSION = "2.2.83"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -503,7 +503,7 @@ def refresh_signs_cache_from_api():
                 "roadway": loc.get("routeId", ""),
             })
 
-        parsed = _stream_parse_signs(resp_obj, _collect, poll=False)
+        parsed = _stream_parse_signs(resp_obj, _collect, poll=True)
         w.feed()
         try:
             resp_obj.close()
@@ -907,16 +907,19 @@ _signs_show_all        = [False]
 _api_error             = [""]
 _signs_page            = [0]
 _signs_show_all        = [False]
+_fetch_now             = [False]   # set when favorites saved -> fetch immediately
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while feeding the watchdog and polling the web server.
     Exits early if _reboot_pending or _id_flash_pending is set."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
-        poll_server()
+       poll_server()
         if _reboot_pending[0]:
             return
         if _id_flash_pending[0]:
+            return
+        if _fetch_now[0]:
             return
         time.sleep(0.01)
 
@@ -1877,7 +1880,7 @@ if HAS_HTTPSERVER and pool is not None:
                 else:
                     sign_count_text = str(len(all_items)) + " signs shown."
 
-                crumb_base = '<a href="/signs" style="color:#00ccff">&#x1F6A6; Traffic Signs</a>'
+                crumb_base = '<a href="/signs-clear" style="color:#00ccff">&#x1F6A6; Traffic Signs</a>'
                 if query.startswith("__roadway__:"):
                     rw_name = query[12:]
                     breadcrumb = (
@@ -2076,6 +2079,8 @@ if HAS_HTTPSERVER and pool is not None:
 
                 ok = save_favorite_signs(merged, old_aliases)
                 favsign_list = merged
+                _fetch_now[0] = True   # interrupt cycle sleep -> show changes now
+              
                 added_here = len(selected)
                 status = ("Saved. " + str(len(merged)) + " total favorite sign(s) ("
                           + str(added_here) + " selected on this view).")
@@ -2511,6 +2516,7 @@ while True:
     print(f"\n{'*' * 48}")
     print(f"Cycle #{cycles}  Free RAM: {gc.mem_free()} bytes")
     print(f"{'*' * 48}")
+    _fetch_now[0] = False
     w.feed()
     gc.collect()
 
@@ -2539,23 +2545,13 @@ while True:
             ok_cache = refresh_signs_cache_from_api()
             gc.collect()
             gc.collect()
-            if ok_cache:
-                # Parsing the full direct-511NY payload fragments the heap
-                # (MicroPython GC does not defragment), which can cause later
-                # allocation failures / spontaneous reboots. Reload now to
-                # return to a clean heap. The cache file persists across the
-                # reload, so favorite selection and fetching run reliably.
-                print("Cache refresh complete — reloading to clear heap.")
-                matrixportal.set_text_color(dim(COLOR_GREEN), 0)
-                matrixportal.set_text(center_multiline_string(
-                    "SIGNS\nCACHED", characters_per_line), 0)
-                safe_delay(2)
-                import supervisor
-                supervisor.reload()
-            else:
-                print("Cache refresh failed — continuing without reload.")
-                safe_delay(cycle_sleep_secs)
-                continue
+            # No reboot. The streaming parser (v2.2.81) keeps peak memory low,
+            # so the heap no longer fragments like the old whole-payload .json()
+            # did. The reload workaround that caused a disruptive self-reboot on
+            # every refresh is gone. Just resume normally.
+            print("Cache refresh done (ok=" + str(ok_cache) + "). Resuming.")
+            safe_delay(cycle_sleep_secs)
+            continue
         else:
             print("Cache refresh skipped — no network.")
 
