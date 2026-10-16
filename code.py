@@ -1985,8 +1985,7 @@ if HAS_HTTPSERVER and pool is not None:
                 if aliases_new:
                     status += " " + str(len(aliases_new)) + " alias(es) updated."
                 cls = "status-ok" if ok else "status-err"
-                print(f"Favorites merged: {len(merged)} total, {added_here} on this view, "
-                      f"{len(shown_set)} shown, {len(aliases_new)} aliases ok={ok}")
+                print(f"Favorites merged: {len(merged)} total, {added_here} on this view, {len(shown_set)} shown, {len(aliases_new)} aliases ok={ok}")
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
