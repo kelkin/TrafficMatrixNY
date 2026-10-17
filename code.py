@@ -106,7 +106,7 @@ v2.2.86 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.86"
+LOCAL_VERSION = "2.2.87"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -1435,8 +1435,10 @@ def html_head(title):
         "#sign-filter{width:100%;max-width:400px;margin-bottom:10px;padding:8px;}"
         ".sign-list{max-height:400px;overflow-y:auto;border:1px solid #333;"
         "border-radius:4px;padding:8px;background:#000;}"
-        ".sign-item{padding:4px 0;border-bottom:1px solid #1a1a1a;}"
-        ".sign-item label{color:#ccc;min-width:0;cursor:pointer;}"
+        ".sign-item{display:flex;flex-wrap:wrap;align-items:center;"
+        "padding:4px 0;border-bottom:1px solid #1a1a1a;}"
+        ".sign-item label{color:#ccc;min-width:0;cursor:pointer;flex:1;}"
+        ".sign-item > div{flex-basis:100%;}"
         ".sign-item input[type=checkbox]{margin-right:8px;cursor:pointer;}"
         ".sign-item.fav label{color:#F7B500;}"
         ".color-preview{display:inline-block;width:24px;height:24px;"
@@ -1447,9 +1449,9 @@ def html_head(title):
         ".preview-btn:hover{background:#334;}"
         ".signs-layout{display:flex;gap:12px;align-items:flex-start;}"
         ".signs-left{flex:1;min-width:0;}"
-        ".signs-right{flex:1;min-width:0;}"
+        ".signs-right{flex:0 0 320px;min-width:0;}"
         ".preview-pane{background:#000;border:1px solid #333;border-radius:6px;"
-        "min-height:420px;padding:16px;position:sticky;top:10px;}"
+        "min-height:200px;padding:16px;position:sticky;top:10px;}"
         ".preview-pane .pv-empty{color:#666;font-style:italic;}"
         ".preview-pane .pv-name{color:#00ccff;font-size:0.85em;margin-bottom:10px;"
         "border-bottom:1px solid #222;padding-bottom:6px;}"
@@ -1458,7 +1460,7 @@ def html_head(title):
         ".preview-pane .pv-status{color:#ff8800;font-style:italic;}"
         "@media (max-width:760px){"
         ".signs-layout{flex-direction:column;}"
-        ".signs-right{order:-1;width:100%;}"
+        ".signs-right{order:-1;width:100%;flex:0 0 auto;}"
         ".preview-pane{min-height:90px;position:sticky;top:0;z-index:10;}"
         "}"
         "</style></head>"
