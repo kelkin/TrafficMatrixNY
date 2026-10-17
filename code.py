@@ -1,5 +1,4 @@
 # "code.py"
-# "code.py"
 # =============================================================================
 # Traffic Matrix NY — LED Highway Sign Display for Matrix Portal S3
 # =============================================================================
@@ -86,10 +85,21 @@ v2.2.84 changes:
   API is re-fetched, not how long a message lingers. Saving favorites still
   interrupts instantly via the _fetch_now flag.
 - Default log auto-refresh is now 1s (was 5s).
+
+v2.2.85 changes:
+- On-demand message PREVIEW on the Traffic Signs page. When viewing a roadway
+  or search, a "Preview Messages on This Page" button does a one-time live feed
+  fetch and keeps ONLY the messages for the signs on that page (streamed, tiny
+  peak RAM; sign cache is left completely untouched). Tap any sign's Preview
+  button to see its current message in an adjoining pane. Mobile/tablet safe:
+  tap-based (no hover), and the pane stacks to the top on narrow screens.
+- Blank/errored signs show their status in the preview instead of looking empty.
+- Light guard: ignores a new preview request within ~30s of the last one to
+  respect the upstream rate limit (direct users own their own limits).
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.84"
+LOCAL_VERSION = "2.2.85"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -557,6 +567,97 @@ def refresh_signs_cache_from_api():
         matrixportal.set_text("", 0)
         gc.collect()
 
+def _preview_text_for(sign):
+    """Flatten a streamed sign's current message into a short preview dict
+    {"status":..., "msg":...} using the new nested API shape
+    (display.pages[].lines[]). Truncated to bound RAM; only ever called for the
+    handful of signs on one roadway/search page."""
+    status = sign.get("status", "") or "UNKNOWN"
+    if status != "DISPLAYING_MESSAGE":
+        return {"status": status, "msg": ""}
+    disp = sign.get("display") or {}
+    pages = disp.get("pages", []) or []
+    parts = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        for l in (page.get("lines", []) or []):
+            s = str(l).strip()
+            if s:
+                parts.append(s)
+        if len(parts) >= 8:
+            break
+    msg = " / ".join(parts)
+    if len(msg) > 200:
+        msg = msg[:200] + "..."
+    return {"status": status, "msg": msg}
+
+def fetch_preview_messages():
+    """Stream the full feed and keep ONLY the messages for the sign IDs in
+    _preview_ids (the signs shown on the current /signs page). Stores results in
+    _preview_data. Peak RAM stays tiny via _stream_parse_signs, and we retain at
+    most ~one roadway's worth of short strings. The sign cache is NOT modified."""
+    ids = set(_preview_ids)
+    if not ids:
+        print("Preview: no ids to fetch.")
+        return False
+    print("Fetching preview messages for " + str(len(ids)) + " signs...")
+    matrixportal.set_text_color(dim(COLOR_CYAN), 0)
+    matrixportal.set_text(center_multiline_string("LOADING\nPREVIEW...", characters_per_line), 0)
+    w.feed()
+
+    resp_obj = None
+    collected = {}
+    try:
+        resp_obj = requests.get(NY511_URL, timeout=30)
+        w.feed()
+        if resp_obj.status_code != 200:
+            print("Preview fetch failed: HTTP " + str(resp_obj.status_code))
+            return False
+
+        def _collect(sign):
+            sid = sign.get("id")
+            if not sid or sid not in ids:
+                return
+            collected[sid] = _preview_text_for(sign)
+
+        parsed = _stream_parse_signs(resp_obj, _collect, poll=True)
+        w.feed()
+        try:
+            resp_obj.close()
+        except Exception:
+            pass
+        resp_obj = None
+        gc.collect()
+
+        if parsed < 0:
+            print("Preview: stream parse failed")
+            return False
+
+        _preview_data.clear()
+        _preview_data.update(collected)
+        print("Preview: collected " + str(len(collected)) + " of "
+              + str(len(ids)) + " messages. Free RAM: " + str(gc.mem_free()))
+
+        matrixportal.set_text_color(dim(0x00FF00), 0)
+        matrixportal.set_text(center_multiline_string("PREVIEW\nREADY", characters_per_line), 0)
+        safe_delay(1)
+        return True
+
+    except Exception as e:
+        print("Preview fetch error: " + str(e))
+        log_exception(e)
+        return False
+    finally:
+        if resp_obj is not None:
+            try:
+                resp_obj.close()
+            except Exception:
+                pass
+        matrixportal.set_text_color(dim(sign_text_color[0]), 0)
+        matrixportal.set_text("", 0)
+        gc.collect()
+
 def load_favorite_signs():
     """Load the list of favorite sign IDs from signs.json."""
     try:
@@ -716,7 +817,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     """Display one matched sign: optional update-time, then name, then phases.
     - Message phases use the API phaseDwellTime unless override is enabled.
     - All non-message info (timestamp, name, NO MESSAGE) uses page_secs."""
-    if _reboot_pending[0] or _id_flash_pending[0]:
+    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
         return
 
     # --- Combined 3-row header: name word-wrapped across rows 1-2, with the
@@ -735,7 +836,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     print("Header:\n" + header)
     safe_delay(name_secs)
     w.feed()
-    if _reboot_pending[0] or _id_flash_pending[0]:
+    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
         return
 
     status = match.get("status", "")
@@ -765,7 +866,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
         blank_secs = 0
 
     for page in pages:
-        if _reboot_pending[0] or _id_flash_pending[0]:
+        if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
             return
         lines = page.get("lines", []) if isinstance(page, dict) else []
         text = "\n".join(str(l) for l in (lines or []))
@@ -950,10 +1051,14 @@ _api_error             = [""]
 _signs_page            = [0]
 _signs_show_all        = [False]
 _fetch_now             = [False]   # set when favorites saved -> fetch immediately
+_preview_pending       = [False]   # set when user requests a message preview fetch
+_preview_ids           = []        # sign ids shown on the current /signs page
+_preview_data          = {}        # id -> {"status":..., "msg":...} from last preview
+_preview_last          = [0.0]     # time.monotonic() of last completed preview
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while feeding the watchdog and polling the web server.
-    Exits early if _reboot_pending or _id_flash_pending is set."""
+    Exits early if a pending web action is set so it is handled promptly."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         poll_server()
@@ -962,6 +1067,8 @@ def safe_delay(seconds):
         if _id_flash_pending[0]:
             return
         if _fetch_now[0]:
+            return
+        if _preview_pending[0]:
             return
         time.sleep(0.01)
 
@@ -1290,6 +1397,26 @@ def html_head(title):
         ".sign-item.fav label{color:#F7B500;}"
         ".color-preview{display:inline-block;width:24px;height:24px;"
         "border-radius:3px;border:1px solid #555;vertical-align:middle;margin-left:8px;}"
+        ".preview-btn{background:#223;color:#00ccff;border:1px solid #335;"
+        "border-radius:3px;font-family:monospace;font-size:0.78em;padding:2px 8px;"
+        "cursor:pointer;margin-left:8px;}"
+        ".preview-btn:hover{background:#334;}"
+        ".signs-layout{display:flex;gap:12px;align-items:flex-start;}"
+        ".signs-left{flex:1;min-width:0;}"
+        ".signs-right{flex:1;min-width:0;}"
+        ".preview-pane{background:#000;border:1px solid #333;border-radius:6px;"
+        "min-height:420px;padding:16px;position:sticky;top:10px;}"
+        ".preview-pane .pv-empty{color:#666;font-style:italic;}"
+        ".preview-pane .pv-name{color:#00ccff;font-size:0.85em;margin-bottom:10px;"
+        "border-bottom:1px solid #222;padding-bottom:6px;}"
+        ".preview-pane .pv-msg{color:#F7B500;font-size:1.15em;line-height:1.6;"
+        "letter-spacing:1px;}"
+        ".preview-pane .pv-status{color:#ff8800;font-style:italic;}"
+        "@media (max-width:760px){"
+        ".signs-layout{flex-direction:column;}"
+        ".signs-right{order:-1;width:100%;}"
+        ".preview-pane{min-height:90px;position:sticky;top:0;z-index:10;}"
+        "}"
         "</style></head>"
     )
 
@@ -1354,6 +1481,30 @@ def _is_too_bright(hex_color):
         return r > 0xC0 and g > 0xC0 and b > 0xC0
     except Exception:
         return False
+
+def _html_escape(s):
+    """Escape a string for safe inclusion in HTML text or a double-quoted attr."""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+def _filter_signs(query, cached, favs):
+    """Return the list of cached signs matching the current /signs filter, or
+    None for the default landing view. Shared by /signs and /preview-signs so
+    both always agree on exactly which signs a page shows."""
+    if query == "__favorites__":
+        return sorted([s for s in cached if s.get("id") in favs],
+                      key=lambda s: s.get("name", ""))
+    elif query.startswith("__roadway__:"):
+        rw = query[12:]
+        return sorted([s for s in cached
+                       if s.get("roadway", "").lower() == rw.lower()],
+                      key=lambda s: s.get("name", ""))
+    elif query:
+        return [s for s in cached if
+                query in s.get("name", "").lower() or
+                query in s.get("roadway", "").lower()]
+    else:
+        return None
 
 
 # --- Start adafruit_httpserver if available ---
@@ -1853,20 +2004,7 @@ if HAS_HTTPSERVER and pool is not None:
             aliases = load_sign_aliases()          # {id: friendly}
             w.feed()
 
-            if query == "__favorites__":
-                all_items = sorted([s for s in cached if s.get("id") in favs],
-                                   key=lambda s: s.get("name", ""))
-            elif query.startswith("__roadway__:"):
-                rw = query[12:]
-                all_items = sorted([s for s in cached
-                                    if s.get("roadway","").lower() == rw.lower()],
-                                   key=lambda s: s.get("name", ""))
-            elif query:
-                all_items = [s for s in cached if
-                             query in s.get("name", "").lower() or
-                             query in s.get("roadway", "").lower()]
-            else:
-                all_items = None
+            all_items = _filter_signs(query, cached, favs)
             w.feed()
 
             if all_items is None:
@@ -1913,10 +2051,8 @@ if HAS_HTTPSERVER and pool is not None:
                     name = sign.get("name", sid)
                     checked = " checked" if sid in favs else ""
                     fav_cls = " fav" if sid in favs else ""
-                    safe_name = (name.replace("&","&amp;").replace("<","&lt;")
-                                     .replace(">","&gt;").replace('"',"&quot;"))
-                    safe_id = (sid.replace("&","&amp;").replace("<","&lt;")
-                                   .replace(">","&gt;").replace('"',"&quot;"))
+                    safe_name = _html_escape(name)
+                    safe_id = _html_escape(sid)
                     roadway = sign.get("roadway", "")
                     roadway_html = ('<div style="color:#555;font-size:0.78em;padding-left:22px;'
                                     'margin-top:-2px">' + roadway + '</div>' if roadway else "")
@@ -1928,14 +2064,23 @@ if HAS_HTTPSERVER and pool is not None:
                         'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
                         'font-family:monospace;" title="Friendly name shown on LED instead of the sign name">'
                     ) if sid in favs else ""
+                    # Preview message (if a preview fetch has run for this sign)
+                    pv = _preview_data.get(sid)
+                    pv_msg = _html_escape(pv.get("msg", "")) if pv else ""
+                    pv_status = _html_escape(pv.get("status", "")) if pv else ""
                     # Hidden "shown" field lets the save handler know which signs
                     # this view presented, so it can merge (not wipe) favorites
                     # selected on other roadways/searches.
                     items_parts.append(
-                        '<div class="sign-item' + fav_cls + '">'
+                        '<div class="sign-item' + fav_cls + '" '
+                        'data-name="' + safe_name + '" '
+                        'data-msg="' + pv_msg + '" '
+                        'data-status="' + pv_status + '">'
                         '<input type="hidden" name="shown" value="' + safe_id + '">'
                         '<label><input type="checkbox" name="fav" value="' +
                         safe_id + '"' + checked + '> ' + safe_name + '</label>'
+                        '<button type="button" class="preview-btn" onclick="showPreview(this)">'
+                        '&#x1F441; Preview</button>'
                         + alias_input
                         + roadway_html + '</div>'
                     )
@@ -1982,12 +2127,63 @@ if HAS_HTTPSERVER and pool is not None:
                     )
                 else:
                     breadcrumb = ""
+
+                # Preview button + two-pane layout (tap a sign to preview)
+                preview_loaded = False
+                for s in all_items:
+                    if s.get("id") in _preview_data:
+                        preview_loaded = True
+                        break
+                if preview_loaded:
+                    preview_hint = "Tap &#x1F441; Preview on any sign to see its current message."
+                else:
+                    preview_hint = ("Click &#x1F441; Preview Messages above to load live messages "
+                                    "for these signs (up to 90s), then tap a sign's Preview button.")
+
+                preview_button = (
+                    '<form method="POST" action="/preview-signs" style="margin-bottom:12px" '
+                    'onsubmit="var b=this.querySelector(\'button\');b.disabled=true;'
+                    'b.textContent=\'Fetching...\';">'
+                    '<button class="btn-cyan" type="submit">&#x1F441; Preview Messages on This Page</button>'
+                    '<span style="color:#888;margin-left:10px;font-size:0.85em">'
+                    'Live fetch &mdash; takes up to 90 seconds</span>'
+                    '</form>'
+                )
+
+                preview_js = (
+                    "<script>"
+                    "function showPreview(btn){"
+                    "var item=btn.closest('.sign-item');"
+                    "var name=item.getAttribute('data-name')||'';"
+                    "var msg=item.getAttribute('data-msg')||'';"
+                    "var st=item.getAttribute('data-status')||'';"
+                    "var pane=document.getElementById('previewpane');"
+                    "var html='<div class=\"pv-name\">'+name+'</div>';"
+                    "if(msg){html+='<div class=\"pv-msg\">'+msg.split(' / ').join('<br>')+'</div>';}"
+                    "else if(st){html+='<div class=\"pv-status\">['+st+' &mdash; no message]</div>';}"
+                    "else{html+='<div class=\"pv-empty\">No preview loaded yet. Click Preview Messages above.</div>';}"
+                    "pane.innerHTML=html;"
+                    "}"
+                    "</script>"
+                )
+
                 list_section = (
                     breadcrumb +
+                    preview_button +
+                    '<div class="signs-layout">'
+                    '<div class="signs-left">'
                     '<form method="POST" action="/save-signs">'
                     '<div class="sign-list" id="signlist">' + items_html + '</div><br>'
                     '<button class="btn-green" type="submit">&#x1F4BE; Save Favorites</button>'
                     '</form>'
+                    '</div>'
+                    '<div class="signs-right">'
+                    '<div class="preview-pane" id="previewpane">'
+                    '<div class="pv-empty">' + preview_hint + '</div>'
+                    '</div>'
+                    '</div>'
+                    '</div>'
+                    + preview_js
                 )
 
             body = (
@@ -2089,6 +2285,79 @@ if HAS_HTTPSERVER and pool is not None:
                 "</div></body></html>"
             )
             return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /preview-status — lightweight poll endpoint ───────────────
+        @server.route("/preview-status", GET)
+        def route_preview_status(request):
+            return Response(request, content_type="text/plain",
+                            headers={"Connection":"close"},
+                            body=("1" if _preview_pending[0] else "0"))
+
+        # ── POST /preview-signs — queue a one-time live message preview ────
+        @server.route("/preview-signs", "POST")
+        def route_preview_signs(request):
+            now = time.monotonic()
+            if not _preview_pending[0]:
+                # Light rate-limit guard (respects upstream 1x/5min recommendation)
+                if _preview_last[0] and (now - _preview_last[0]) < 30:
+                    body = (
+                        html_head("Preview") +
+                        "<body>" + html_nav("signs") +
+                        "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                        "<div class=\"card\">"
+                        "<p style=\"color:#ffaa00\">A preview just ran. Please wait about "
+                        "30 seconds between previews to respect the data rate limit.</p>"
+                        "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                        "</div></body></html>"
+                    )
+                    return Response(request, content_type="text/html",
+                                    headers={"Connection":"close"}, body=body)
+                query = _signs_filter[0]
+                cached = load_signs_cache()
+                favs = set(load_favorite_signs())
+                items = _filter_signs(query, cached, favs)
+                if not items:
+                    body = (
+                        html_head("Preview") +
+                        "<body>" + html_nav("signs") +
+                        "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                        "<div class=\"card\">"
+                        "<p style=\"color:#ffaa00\">Open a roadway or run a search first, "
+                        "then click Preview Messages.</p>"
+                        "<a href=\"/signs\"><button class=\"btn-gray\">&#x2190; Back to Signs</button></a>"
+                        "</div></body></html>"
+                    )
+                    return Response(request, content_type="text/html",
+                                    headers={"Connection":"close"}, body=body)
+                ids = [s.get("id") for s in items if s.get("id")]
+                _preview_ids.clear()
+                _preview_ids.extend(ids)
+                _preview_pending[0] = True
+                print("Preview queued for " + str(len(ids)) + " signs.")
+
+            count = len(_preview_ids)
+            body = (
+                html_head("Loading Preview...") +
+                "<body>" + html_nav("signs") +
+                "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#ffaa00\">&#x23F3; Fetching live messages for "
+                + str(count) + " signs...</p>"
+                "<p style=\"color:#aaa\">This can take <strong>up to 90 seconds</strong> "
+                "&mdash; the device downloads the full feed and extracts the messages for "
+                "the signs on this page. The page will refresh automatically when it's "
+                "ready. Please don't navigate away.</p>"
+                "<p id=\"st\" style=\"color:#888\">&#x23F3; Working...</p>"
+                "<script>"
+                "function chk(){fetch('/preview-status').then(function(r){return r.text();})"
+                ".then(function(t){if(t.trim()==='0'){window.location='/signs';}"
+                "else{setTimeout(chk,2000);}}).catch(function(){setTimeout(chk,2000);});}"
+                "setTimeout(chk,5000);"
+                "</script>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html",
+                            headers={"Connection":"close"}, body=body)
 
         # ── POST /save-signs ──────────────────────────────────────────────
         @server.route("/save-signs", "POST")
@@ -2616,6 +2885,27 @@ while True:
             print("Cache refresh skipped — no network.")
         continue
 
+    if _preview_pending[0]:
+        if wifi.radio.connected and pool is not None:
+            try:
+                ssl_context = ssl.create_default_context()
+                try:
+                    ssl_context.load_verify_locations(cadata="")
+                except Exception:
+                    pass
+                requests = adafruit_requests.Session(pool, ssl_context)
+                gc.collect()
+            except Exception as _pv_sess_err:
+                print("Preview session refresh failed: " + str(_pv_sess_err))
+            fetch_preview_messages()
+            _preview_last[0] = time.monotonic()
+            gc.collect()
+            gc.collect()
+        else:
+            print("Preview skipped — no network.")
+        _preview_pending[0] = False   # cleared AFTER fetch so /preview-status is accurate
+        continue
+
     if _id_flash_pending[0]:
         _id_flash_pending[0] = False
         unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
@@ -2780,7 +3070,8 @@ while True:
 
     for match in matched_signs:
         if (_reboot_pending[0] or _id_flash_pending[0]
-                or _refresh_cache_pending[0] or _fetch_now[0]):
+                or _refresh_cache_pending[0] or _fetch_now[0]
+                or _preview_pending[0]):
             break
         w.feed()
         print("\nMATCH: " + str(match["name"]))
