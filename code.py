@@ -89,7 +89,7 @@ v2.2.84 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.85"
+LOCAL_VERSION = "2.2.84"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
