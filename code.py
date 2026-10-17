@@ -106,7 +106,7 @@ v2.2.86 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.87"
+LOCAL_VERSION = "2.2.88"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -2126,11 +2126,11 @@ if HAS_HTTPSERVER and pool is not None:
                         '<input type="hidden" name="shown" value="' + safe_id + '">'
                         '<label><input type="checkbox" name="fav" value="' +
                         safe_id + '"' + checked + '> ' + safe_name + '</label>'
+                        + alias_input +
                         '<button type="button" class="preview-btn" onclick="showPreview(this)">'
                         '&#x1F441; Preview Here</button>'
                         '<button type="button" class="preview-btn" onclick="showOnSign(this)">'
                         '&#x1F4FA; Preview On Sign</button>'
-                        + alias_input
                         + roadway_html + '</div>'
                     )
                 items_html = "".join(items_parts)
