@@ -161,7 +161,6 @@ class WebLogger:
 web_logger = WebLogger()
 _original_print = print
 
-def keith(
 def print(*args, **kwargs):
     """Overrides built-in print() to mirror output into the WebLogger buffer."""
     sep = kwargs.get("sep", " ")
