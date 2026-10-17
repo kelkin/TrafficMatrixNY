@@ -1,4 +1,5 @@
 # "code.py"
+# "code.py"
 # =============================================================================
 # Traffic Matrix NY — LED Highway Sign Display for Matrix Portal S3
 # =============================================================================
@@ -73,10 +74,22 @@ v2.2.78 changes:
   signs every cycle for nothing, starving the web server and making the UI
   nearly unreachable). It shows the amber prompt and keeps the web UI
   responsive; fetching resumes automatically once favorites are saved.
+
+v2.2.84 changes:
+- Sign names now WORD-WRAP (break on spaces) to the display width instead of
+  being truncated. Long names flow onto a second row.
+- New 3-row header per sign: name on rows 1-2 (wrapped), with the sign's
+  last-updated time on row 3 ("Upd M/D/YY H:MMAM TZ") when Show Update Time is
+  enabled. Replaces the old separate name + timestamp screens.
+- Continuous rotation (no more 30s frozen last message): already-fetched signs
+  loop continuously on the LED. The cycle interval now gates only how often the
+  API is re-fetched, not how long a message lingers. Saving favorites still
+  interrupts instantly via the _fetch_now flag.
+- Default log auto-refresh is now 1s (was 5s).
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.83"
+LOCAL_VERSION = "2.2.84"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -227,7 +240,7 @@ _default_settings = {
     "matrix_debug":         False,   # Enable MatrixPortal debug output
     "characters_per_line":  30,      # Text wrapping width
     "brightness":           0.8,     # Display brightness 0.0-1.0
-    "log_refresh_seconds":  5,       # Log page auto-refresh interval (0=disabled)
+    "log_refresh_seconds":  1,       # Log page auto-refresh interval (0=disabled)
     "api_url":              "https://nyapi.carsprogram.org/signs.json",
     "api_key":              "",      # Unused on direct path; for premium Worker path
     "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE")
@@ -661,6 +674,37 @@ def center_multiline_string(text, width_chars):
     """Centers each line of a multi-line string to fit the matrix display."""
     return "\n".join(line.center(width_chars) for line in text.splitlines())
 
+def word_wrap(text, width_chars):
+    """Word-wrap text to at most width_chars per line, breaking on spaces.
+    Honors any explicit newlines already in the text, and hard-splits any
+    single word longer than width_chars. Returns a list of lines (never empty).
+    Used for sign names so long names flow onto a second row instead of being
+    truncated at the panel edge."""
+    lines = []
+    for raw_line in (str(text).splitlines() or [""]):
+        words = raw_line.split()
+        if not words:
+            lines.append("")
+            continue
+        cur = ""
+        for word in words:
+            while len(word) > width_chars:
+                if cur:
+                    lines.append(cur)
+                    cur = ""
+                lines.append(word[:width_chars])
+                word = word[width_chars:]
+            if not cur:
+                cur = word
+            elif len(cur) + 1 + len(word) <= width_chars:
+                cur += " " + word
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+    return lines or [""]
+
 def clean_string(text):
     """Strips brackets, quotes, and normalises type to str."""
     if text is None:
@@ -675,22 +719,20 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     if _reboot_pending[0] or _id_flash_pending[0]:
         return
 
-    # Mode-2 timestamp: each sign's own lastUpdated, shown before its message
-    if _show_timestamp[0]:
-        ts_str, tz = epoch_to_local_str(match.get("last_updated", 0))
-        matrixportal.set_text_color(dim(COLOR_CYAN), 0)
-        matrixportal.set_text(center_multiline_string(
-            "Data Last Update\n" + ts_str + " (" + tz + ")", characters_per_line), 0)
-        safe_delay(page_secs)
-        w.feed()
-        if _reboot_pending[0] or _id_flash_pending[0]:
-            return
-
-    # Sign name
+    # --- Combined 3-row header: name word-wrapped across rows 1-2, with the
+    # sign's last-updated time on row 3 (when Show Update Time is enabled). ---
     clean_name = clean_string(match.get("name", ""))
     print(f"Name: {clean_name}")
+    if _show_timestamp[0]:
+        ts_str, tz = epoch_to_local_str(match.get("last_updated", 0))
+        header_lines = word_wrap(clean_name, characters_per_line)[:2]
+        header_lines.append("Upd " + ts_str + " " + tz)
+    else:
+        header_lines = word_wrap(clean_name, characters_per_line)[:3]
+    header = "\n".join(l.center(characters_per_line) for l in header_lines)
     matrixportal.set_text_color(dim(sign_name_color[0]), 0)
-    matrixportal.set_text(center_multiline_string(clean_name, characters_per_line), 0)
+    matrixportal.set_text(header, 0)
+    print("Header:\n" + header)
     safe_delay(name_secs)
     w.feed()
     if _reboot_pending[0] or _id_flash_pending[0]:
@@ -1118,7 +1160,34 @@ def perform_ota_check(requests_session, force=False):
                         pass
                 gc.collect()
 
-        print("All files staged. Applying atomic swap...")
+        # --- OTA SELF-VALIDATION: compile every staged .py on-device before swap ---
+        # CPython ast.parse CANNOT catch MicroPython-specific syntax; the device's
+        # own compile() can. A bad push can no longer brick a field unit.
+        print("Validating staged files (on-device compile)...")
+        for temp_path, final_path in successful_swaps:
+            if not final_path.endswith(".py"):
+                continue
+            try:
+                with open(temp_path, "r") as vf:
+                    source = vf.read()
+                compile(source, final_path, "exec")
+                source = None
+                gc.collect()
+                print(f"    OK: {final_path}")
+            except Exception as compile_err:
+                print(f"    VALIDATION FAILED for {final_path}: {compile_err}")
+                log_exception(compile_err)
+                for tmp_cleanup, _ in successful_swaps:
+                    try:
+                        os.remove(tmp_cleanup)
+                    except OSError:
+                        pass
+                matrixportal.set_text_color(dim(0xFF0000), 0)
+                matrixportal.set_text(center_multiline_string("UPDATE\nREJECTED", characters_per_line), 0)
+                safe_delay(5)
+                return
+
+        print("All files staged and validated. Applying atomic swap...")
         for temp_path, final_path in successful_swaps:
             try:
                 os.remove(final_path)
@@ -1617,7 +1686,9 @@ if HAS_HTTPSERVER and pool is not None:
                 "and message phases when Override is on</small></div>"
 
                 "<div class=\"row\"><label>Cycle interval:</label>" +
-                hms_inputs("cycle", c_h, c_m, c_s) + "</div>"
+                hms_inputs("cycle", c_h, c_m, c_s) +
+                "<small style=\"color:#888\"> &mdash; how often sign data is re-fetched "
+                "from the API (signs rotate continuously in between)</small></div>"
 
                 "<br><button class=\"btn-green\" type=\"submit\">&#x1F4BE; Save Settings</button>"
                 "</form></div>"
@@ -2508,7 +2579,14 @@ else:
     print("Visit the Traffic Signs tab on the web UI to select signs.")
 
 # --- Main Loop ---
+# v2.2.84 Option C: the API is re-fetched at most once every cycle_sleep_secs,
+# but the already-matched signs rotate continuously on the LED in between, so
+# the last message never freezes on screen for the whole interval. Saving
+# favorites sets _fetch_now, which interrupts the current pass and refetches.
 cycles = 0
+matched_signs = []      # cached across iterations for continuous rotation
+last_fetch = 0.0        # time.monotonic() of the last fetch attempt
+have_fetched = False    # True once at least one fetch has completed
 w.feed()
 
 while True:
@@ -2516,22 +2594,10 @@ while True:
     print(f"\n{'*' * 48}")
     print(f"Cycle #{cycles}  Free RAM: {gc.mem_free()} bytes")
     print(f"{'*' * 48}")
-    _fetch_now[0] = False
     w.feed()
     gc.collect()
 
-    if cycles > 1 and pool is not None:
-        try:
-            ssl_context = ssl.create_default_context()
-            try:
-                ssl_context.load_verify_locations(cadata="")
-            except Exception:
-                pass
-            requests = adafruit_requests.Session(pool, ssl_context)
-            gc.collect()
-        except Exception as _sess_err:
-            print(f"Session refresh failed: {_sess_err}")
-
+    # --- Pending web-UI actions ---
     if _reboot_pending[0]:
         _reboot_pending[0] = False
         print("Rebooting as requested by web UI...")
@@ -2545,15 +2611,10 @@ while True:
             ok_cache = refresh_signs_cache_from_api()
             gc.collect()
             gc.collect()
-            # No reboot. The streaming parser (v2.2.81) keeps peak memory low,
-            # so the heap no longer fragments like the old whole-payload .json()
-            # did. The reload workaround that caused a disruptive self-reboot on
-            # every refresh is gone. Just resume normally.
             print("Cache refresh done (ok=" + str(ok_cache) + "). Resuming.")
-            safe_delay(cycle_sleep_secs)
-            continue
         else:
             print("Cache refresh skipped — no network.")
+        continue
 
     if _id_flash_pending[0]:
         _id_flash_pending[0] = False
@@ -2568,6 +2629,7 @@ while True:
             time.sleep(0.4)
         matrixportal.set_text("", 0)
         print("ID flash complete.")
+        continue
 
     if not wifi.radio.connected:
         print("WiFi dropped. Reconnecting...")
@@ -2582,119 +2644,147 @@ while True:
         safe_delay(cycle_sleep_secs)
         continue
 
-    # No favorites selected — skip the full-feed fetch entirely. Fetching and
-    # parsing ~1000+ signs every cycle for nothing starves the web server and
-    # can make the UI nearly unreachable. Just show the amber prompt and keep
-    # polling the web server so the user can pick favorites. Fetching resumes
-    # automatically next cycle once favsign_list is populated.
+    # No favorites selected — skip the full-feed fetch entirely (parsing ~1000+
+    # signs for nothing starves the web server). Show the amber prompt and keep
+    # the web UI responsive; fetching resumes once favsign_list is populated.
     if not favsign_list:
         print("No favorites selected — skipping fetch. Showing prompt.")
+        matched_signs = []
+        have_fetched = False
         matrixportal.set_text_color(dim(COLOR_AMBER), 0)
         matrixportal.set_text(center_multiline_string("No Favorites\nSelected", characters_per_line), 0)
         safe_delay(cycle_sleep_secs)
         continue
 
-    print("Fetching 511NY signs data...")
-    response = None
-    matched_signs = []
-    try:
-        poll_server()
+    # --- Decide whether to (re)fetch this pass ---
+    now = time.monotonic()
+    need_fetch = (_fetch_now[0] or not have_fetched
+                  or (now - last_fetch) >= cycle_sleep_secs)
+    _fetch_now[0] = False
 
-        response = requests.get(NY511_URL, timeout=30)
-        w.feed()
-        code = response.status_code
-
-        if code == 401 or code == 403:
-            _api_error[0] = "BAD\nAPI KEY"
-            print("API rejected key: HTTP " + str(code) + ". Stopping fetches.")
-            matrixportal.set_text_color(dim(COLOR_RED), 0)
-            matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
+    if need_fetch:
+        print("Fetching 511NY signs data...")
+        # Fresh TLS session before each fetch.
+        if pool is not None:
             try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-            safe_delay(cycle_sleep_secs)
-            continue
+                ssl_context = ssl.create_default_context()
+                try:
+                    ssl_context.load_verify_locations(cadata="")
+                except Exception:
+                    pass
+                requests = adafruit_requests.Session(pool, ssl_context)
+                gc.collect()
+            except Exception as _sess_err:
+                print(f"Session refresh failed: {_sess_err}")
 
-        if code == 404:
-            _api_error[0] = "BAD\nAPI URL"
-            print("API URL not found: HTTP 404. Stopping fetches.")
-            matrixportal.set_text_color(dim(COLOR_RED), 0)
-            matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
-            try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-            safe_delay(cycle_sleep_secs)
-            continue
-
-        if code != 200:
-            print("API returned HTTP " + str(code))
-        else:
-            print("API fetch OK. Streaming + matching favorites...")
-            fav_set = set(favsign_list)
-            use_friendly = settings.get("use_friendly_names", True)
-            sign_aliases = load_sign_aliases() if use_friendly else {}
-
-            def _match(sign):
-                sid = sign.get("id")
-                if sid and sid in fav_set:
-                    ny_name = sign.get("name", sid)
-                    display_name = sign_aliases.get(sid, ny_name) if use_friendly else ny_name
-                    disp = sign.get("display") or {}
-                    props = sign.get("properties") or {}
-                    matched_signs.append({
-                        "id": sid,
-                        "name": display_name,
-                        "status": sign.get("status", ""),
-                        "pages": disp.get("pages", []),
-                        "dwell_ms": props.get("phaseDwellTime", 2500),
-                        "blank_ms": props.get("phaseBlankTime", 0),
-                        "last_updated": sign.get("lastUpdated", 0),
-                    })
-
-            parsed = _stream_parse_signs(response, _match, poll=True)
-            try:
-                response.close()
-            except Exception:
-                pass
-            response = None
-            gc.collect()
-            gc.collect()
-            print("Parsed " + str(parsed) + " signs. Matched " + str(len(matched_signs))
-                  + ". Free RAM: " + str(gc.mem_free()))
-
+        response = None
+        new_matched = []
+        try:
             poll_server()
 
-            if not matched_signs:
-                print("Favorites set but none found in feed — showing notice.")
-                matrixportal.set_text_color(dim(COLOR_AMBER), 0)
-                matrixportal.set_text(center_multiline_string(
-                    "Favorites\nNot Found", characters_per_line), 0)
+            response = requests.get(NY511_URL, timeout=30)
+            w.feed()
+            code = response.status_code
+
+            if code == 401 or code == 403:
+                _api_error[0] = "BAD\nAPI KEY"
+                print("API rejected key: HTTP " + str(code) + ". Stopping fetches.")
+                matrixportal.set_text_color(dim(COLOR_RED), 0)
+                matrixportal.set_text(center_multiline_string("BAD\nAPI KEY", characters_per_line), 0)
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                response = None
+                safe_delay(cycle_sleep_secs)
+                continue
+
+            if code == 404:
+                _api_error[0] = "BAD\nAPI URL"
+                print("API URL not found: HTTP 404. Stopping fetches.")
+                matrixportal.set_text_color(dim(COLOR_RED), 0)
+                matrixportal.set_text(center_multiline_string("BAD\nAPI URL", characters_per_line), 0)
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                response = None
+                safe_delay(cycle_sleep_secs)
+                continue
+
+            if code != 200:
+                print("API returned HTTP " + str(code))
             else:
-                for match in matched_signs:
-                    if _reboot_pending[0]:
-                        break
-                    w.feed()
-                    print("\nMATCH: " + str(match["name"]))
-                    display_sign(match, name_disp_secs, page_disp_secs)
+                print("API fetch OK. Streaming + matching favorites...")
+                fav_set = set(favsign_list)
+                use_friendly = settings.get("use_friendly_names", True)
+                sign_aliases = load_sign_aliases() if use_friendly else {}
 
-    except Exception as e:
-        print("API/display error: " + str(e))
-        log_exception(e)
-    finally:
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
-        matched_signs = None
-        gc.collect()
-        gc.collect()
-        gc.collect()
+                def _match(sign):
+                    sid = sign.get("id")
+                    if sid and sid in fav_set:
+                        ny_name = sign.get("name", sid)
+                        display_name = sign_aliases.get(sid, ny_name) if use_friendly else ny_name
+                        disp = sign.get("display") or {}
+                        props = sign.get("properties") or {}
+                        new_matched.append({
+                            "id": sid,
+                            "name": display_name,
+                            "status": sign.get("status", ""),
+                            "pages": disp.get("pages", []),
+                            "dwell_ms": props.get("phaseDwellTime", 2500),
+                            "blank_ms": props.get("phaseBlankTime", 0),
+                            "last_updated": sign.get("lastUpdated", 0),
+                        })
 
-    print("Cycle complete. RAM: " + str(gc.mem_free()) + " bytes. Waiting "
-          + str(cycle_sleep_secs) + "s...")
-    safe_delay(cycle_sleep_secs)
+                parsed = _stream_parse_signs(response, _match, poll=True)
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                response = None
+                gc.collect()
+                gc.collect()
+                print("Parsed " + str(parsed) + " signs. Matched " + str(len(new_matched))
+                      + ". Free RAM: " + str(gc.mem_free()))
+                # Only replace the live list on a clean parse; on a parse error
+                # (-1) keep the previous matched_signs so the LED keeps rotating.
+                if parsed >= 0:
+                    matched_signs = new_matched
+
+        except Exception as e:
+            print("API/fetch error: " + str(e))
+            log_exception(e)
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            new_matched = None
+            gc.collect()
+            gc.collect()
+
+        last_fetch = time.monotonic()
+        have_fetched = True
+        poll_server()
+
+    # --- Display pass: rotate through the cached matched_signs once ---
+    if not matched_signs:
+        print("Favorites set but none found in feed — showing notice.")
+        matrixportal.set_text_color(dim(COLOR_AMBER), 0)
+        matrixportal.set_text(center_multiline_string(
+            "Favorites\nNot Found", characters_per_line), 0)
+        safe_delay(cycle_sleep_secs)
+        continue
+
+    for match in matched_signs:
+        if (_reboot_pending[0] or _id_flash_pending[0]
+                or _refresh_cache_pending[0] or _fetch_now[0]):
+            break
+        w.feed()
+        print("\nMATCH: " + str(match["name"]))
+        display_sign(match, name_disp_secs, page_disp_secs)
+
+    gc.collect()
+    print("Display pass complete. RAM: " + str(gc.mem_free()) + " bytes.")
