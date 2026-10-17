@@ -96,10 +96,17 @@ v2.2.85 changes:
 - Blank/errored signs show their status in the preview instead of looking empty.
 - Light guard: ignores a new preview request within ~30s of the last one to
   respect the upstream rate limit (direct users own their own limits).
+
+v2.2.86 changes:
+- Each previewed sign now has TWO buttons: "Preview Here" (web pane, as before)
+  and "Preview On Sign", which flashes that sign's current message on the LED
+  for ~5 seconds then reverts to normal operation. Uses the page/dwell data
+  already captured by the preview fetch, so NO extra network request is made.
+  Only available after a message preview has been loaded for that page.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.85"
+LOCAL_VERSION = "2.2.86"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -568,29 +575,37 @@ def refresh_signs_cache_from_api():
         gc.collect()
 
 def _preview_text_for(sign):
-    """Flatten a streamed sign's current message into a short preview dict
-    {"status":..., "msg":...} using the new nested API shape
-    (display.pages[].lines[]). Truncated to bound RAM; only ever called for the
-    handful of signs on one roadway/search page."""
+    """Build a preview record for one streamed sign: a flattened short string
+    ("msg") for the web pane, PLUS the raw page/dwell data so the same message
+    can be rendered on the LED via "Preview On Sign" (no extra network). Only
+    ever called for the handful of signs on one roadway/search page."""
     status = sign.get("status", "") or "UNKNOWN"
-    if status != "DISPLAYING_MESSAGE":
-        return {"status": status, "msg": ""}
     disp = sign.get("display") or {}
+    props = sign.get("properties") or {}
     pages = disp.get("pages", []) or []
     parts = []
-    for page in pages:
-        if not isinstance(page, dict):
-            continue
-        for l in (page.get("lines", []) or []):
-            s = str(l).strip()
-            if s:
-                parts.append(s)
-        if len(parts) >= 8:
-            break
+    if status == "DISPLAYING_MESSAGE":
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            for l in (page.get("lines", []) or []):
+                s = str(l).strip()
+                if s:
+                    parts.append(s)
+            if len(parts) >= 8:
+                break
     msg = " / ".join(parts)
     if len(msg) > 200:
         msg = msg[:200] + "..."
-    return {"status": status, "msg": msg}
+    return {
+        "status": status,
+        "msg": msg,
+        "name": sign.get("name", sign.get("id", "")),
+        "pages": pages if status == "DISPLAYING_MESSAGE" else [],
+        "dwell_ms": props.get("phaseDwellTime", 2500),
+        "blank_ms": props.get("phaseBlankTime", 0),
+        "last_updated": sign.get("lastUpdated", 0),
+    }
 
 def fetch_preview_messages():
     """Stream the full feed and keep ONLY the messages for the sign IDs in
@@ -817,7 +832,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     """Display one matched sign: optional update-time, then name, then phases.
     - Message phases use the API phaseDwellTime unless override is enabled.
     - All non-message info (timestamp, name, NO MESSAGE) uses page_secs."""
-    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
+    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0] or _preview_led_id[0]:
         return
 
     # --- Combined 3-row header: name word-wrapped across rows 1-2, with the
@@ -836,7 +851,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
     print("Header:\n" + header)
     safe_delay(name_secs)
     w.feed()
-    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
+    if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0] or _preview_led_id[0]:
         return
 
     status = match.get("status", "")
@@ -866,7 +881,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
         blank_secs = 0
 
     for page in pages:
-        if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0]:
+        if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0] or _preview_led_id[0]:
             return
         lines = page.get("lines", []) if isinstance(page, dict) else []
         text = "\n".join(str(l) for l in (lines or []))
@@ -879,6 +894,32 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
             matrixportal.set_text("", 0)
             safe_delay(blank_secs)
             w.feed()
+
+def preview_on_led(pv, hold_secs=5):
+    """Render a previewed sign's current message on the LED for ~hold_secs, then
+    return so the main loop resumes normal operation. Uses the page/dwell data
+    captured during the message preview fetch — no new network request."""
+    status = pv.get("status", "")
+    pages = pv.get("pages", []) or []
+    matrixportal.set_text_color(dim(sign_text_color[0]), 0)
+    if status != "DISPLAYING_MESSAGE" or not pages:
+        matrixportal.set_text(center_multiline_string("NO MESSAGE", characters_per_line), 0)
+        safe_delay(hold_secs)
+        matrixportal.set_text("", 0)
+        return
+    start = time.monotonic()
+    idx = 0
+    while time.monotonic() - start < hold_secs:
+        page = pages[idx % len(pages)]
+        lines = page.get("lines", []) if isinstance(page, dict) else []
+        text = "\n".join(str(l) for l in (lines or []))
+        matrixportal.set_text(center_multiline_string(text, characters_per_line), 0)
+        idx += 1
+        safe_delay(2.5)
+        w.feed()
+        if _reboot_pending[0] or _id_flash_pending[0]:
+            break
+    matrixportal.set_text("", 0)
 
 def ensure_dir_exists(filepath):
     """Creates all parent directories for filepath using single-level os.mkdir()."""
@@ -1055,6 +1096,7 @@ _preview_pending       = [False]   # set when user requests a message preview fe
 _preview_ids           = []        # sign ids shown on the current /signs page
 _preview_data          = {}        # id -> {"status":..., "msg":...} from last preview
 _preview_last          = [0.0]     # time.monotonic() of last completed preview
+_preview_led_id        = [""]      # id to flash on the LED from the preview page
 
 def safe_delay(seconds):
     """Sleeps for `seconds` while feeding the watchdog and polling the web server.
@@ -1069,6 +1111,8 @@ def safe_delay(seconds):
         if _fetch_now[0]:
             return
         if _preview_pending[0]:
+            return
+        if _preview_led_id[0]:
             return
         time.sleep(0.01)
 
@@ -2073,6 +2117,7 @@ if HAS_HTTPSERVER and pool is not None:
                     # selected on other roadways/searches.
                     items_parts.append(
                         '<div class="sign-item' + fav_cls + '" '
+                        'data-id="' + safe_id + '" '
                         'data-name="' + safe_name + '" '
                         'data-msg="' + pv_msg + '" '
                         'data-status="' + pv_status + '">'
@@ -2080,7 +2125,9 @@ if HAS_HTTPSERVER and pool is not None:
                         '<label><input type="checkbox" name="fav" value="' +
                         safe_id + '"' + checked + '> ' + safe_name + '</label>'
                         '<button type="button" class="preview-btn" onclick="showPreview(this)">'
-                        '&#x1F441; Preview</button>'
+                        '&#x1F441; Preview Here</button>'
+                        '<button type="button" class="preview-btn" onclick="showOnSign(this)">'
+                        '&#x1F4FA; Preview On Sign</button>'
                         + alias_input
                         + roadway_html + '</div>'
                     )
@@ -2135,7 +2182,7 @@ if HAS_HTTPSERVER and pool is not None:
                         preview_loaded = True
                         break
                 if preview_loaded:
-                    preview_hint = "Tap &#x1F441; Preview on any sign to see its current message."
+                    preview_hint = "Tap &#x1F441; Preview Here on any sign to see its current message."
                 else:
                     preview_hint = ("Click &#x1F441; Preview Messages above to load live messages "
                                     "for these signs (up to 90s), then tap a sign's Preview button.")
@@ -2163,6 +2210,17 @@ if HAS_HTTPSERVER and pool is not None:
                     "else if(st){html+='<div class=\"pv-status\">['+st+' &mdash; no message]</div>';}"
                     "else{html+='<div class=\"pv-empty\">No preview loaded yet. Click Preview Messages above.</div>';}"
                     "pane.innerHTML=html;"
+                    "}"
+                    "function showOnSign(btn){"
+                    "var item=btn.closest('.sign-item');"
+                    "var id=item.getAttribute('data-id')||'';"
+                    "var old=btn.innerHTML;"
+                    "btn.innerHTML='Sending...';"
+                    "var d=new URLSearchParams();d.append('id',id);"
+                    "fetch('/preview-led',{method:'POST',body:d}).then(function(r){return r.text();})"
+                    ".then(function(t){btn.innerHTML=(t.trim()==='OK')?'On Sign!':'Preview first';"
+                    "setTimeout(function(){btn.innerHTML=old;},3000);})"
+                    ".catch(function(){btn.innerHTML=old;});"
                     "}"
                     "</script>"
                 )
@@ -2358,6 +2416,19 @@ if HAS_HTTPSERVER and pool is not None:
             )
             return Response(request, content_type="text/html",
                             headers={"Connection":"close"}, body=body)
+
+        # ── POST /preview-led — flash a previewed sign's message on the LED ─
+        @server.route("/preview-led", "POST")
+        def route_preview_led(request):
+            p = parse_post_body(request)
+            sid = url_decode(p.get("id", ""))
+            if sid and sid in _preview_data:
+                _preview_led_id[0] = sid
+                print("Preview-on-sign queued: " + sid)
+                return Response(request, content_type="text/plain",
+                                headers={"Connection":"close"}, body="OK")
+            return Response(request, content_type="text/plain",
+                            headers={"Connection":"close"}, body="NODATA")
 
         # ── POST /save-signs ──────────────────────────────────────────────
         @server.route("/save-signs", "POST")
@@ -2906,6 +2977,17 @@ while True:
         _preview_pending[0] = False   # cleared AFTER fetch so /preview-status is accurate
         continue
 
+    if _preview_led_id[0]:
+        sid = _preview_led_id[0]
+        _preview_led_id[0] = ""
+        pv = _preview_data.get(sid)
+        if pv:
+            print("Preview on sign: " + str(pv.get("name", sid)))
+            preview_on_led(pv, 5)
+        else:
+            print("Preview-on-sign: no data for " + sid)
+        continue
+
     if _id_flash_pending[0]:
         _id_flash_pending[0] = False
         unit_label = settings.get("unit_name", "").strip() or "THIS\nUNIT"
@@ -3071,7 +3153,7 @@ while True:
     for match in matched_signs:
         if (_reboot_pending[0] or _id_flash_pending[0]
                 or _refresh_cache_pending[0] or _fetch_now[0]
-                or _preview_pending[0]):
+                or _preview_pending[0] or _preview_led_id[0]):
             break
         w.feed()
         print("\nMATCH: " + str(match["name"]))
@@ -3079,3 +3161,5 @@ while True:
 
     gc.collect()
     print("Display pass complete. RAM: " + str(gc.mem_free()) + " bytes.")
+
+# last line
