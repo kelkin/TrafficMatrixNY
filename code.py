@@ -106,7 +106,7 @@ v2.2.86 changes:
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.88"
+LOCAL_VERSION = "2.2.89"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -363,7 +363,7 @@ bit_depth           = int(settings.get("depth", 6))
 matrix_debug        = bool(settings.get("matrix_debug", False))
 print("Settings: color_order=" + color_order + " text_color=" + hex(sign_text_color[0])
       + " name=" + str(name_disp_secs) + "s msg=" + str(msg_disp_secs)
-      + "s cycle=" + str(cycle_sleep_secs) + "s")
+      + "s cycle=" + str(cycle_sleep_secs) + "s bit_depth=" + str(bit_depth))
 
 # Mutable brightness container — updated live from settings, no reboot needed.
 _brightness = [max(0.05, min(1.0, brightness))]
@@ -1794,17 +1794,18 @@ if HAS_HTTPSERVER and pool is not None:
                 "<small style=\"color:#888;margin-left:8px\">Applied immediately, no reboot needed</small>"
                 "</div>"
 
-                "<div class=\"row\"><label>Scan Quality:</label>"
+               "<div class=\"row\"><label>Scan Quality:</label>"
                 "<select name=\"depth\">"
                 + "".join(
                     '<option value="' + str(d) + '"' +
                     (' selected' if int(settings.get("depth", 6)) == d else '') +
-                    '>' + {4:"4 - Max Stability", 5:"5 - Balanced", 6:"6 - Max Quality"}[d] + '</option>'
-                    for d in [4, 5, 6]
+                    '>' + {1:"1 - Lowest (2-color)", 2:"2 - Very Low", 3:"3 - Low",
+                           4:"4 - Balanced", 5:"5 - Better", 6:"6 - Max Quality"}[d] + '</option>'
+                    for d in [1, 2, 3, 4, 5, 6]
                 ) +
                 "</select>"
-                "<small style=\"color:#888;margin-left:8px\">Lower = less display glitching, higher = better color depth "
-                "(requires reboot)</small>"
+                "<small style=\"color:#888;margin-left:8px\">Lower = faster refresh / less flicker but fewer colors "
+                "(amber shifts toward yellow at 1-2). Requires reboot.</small>"
                 "</div>"
 
                 "<div class=\"row\"><label>Color Order:</label>"
