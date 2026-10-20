@@ -16,97 +16,38 @@
 """
 Robust CircuitPython Main Program for Matrix Portal S3 Traffic Sign Display.
 
-Features:
-- Fetches live traffic sign data from the NY511 signs.json API and displays
-  matched signs (matched by stable sign id).
-- MatrixPortal hardware initialized once at startup (not inside the loop).
-- SocketPool and Requests Session created once and reused across cycles.
-- Aggressive garbage collection to prevent heap fragmentation/memory exhaustion.
-- Hardware Watchdog Timer (45s) automatically reboots the board if frozen.
-- Graceful WiFi reconnection; displays SSID/IP on matrix at connect time.
-- WebLogger captures all print() output into an in-memory ring buffer.
-- Emergency Rescue Web Server (raw socket, port 80) streams the log buffer
-  to any browser when adafruit_httpserver is unavailable.
-- adafruit_httpserver used when available, with defensive fallback to rescue server.
-- Shadow library cleanup removes stale single-file httpserver remnants on boot.
-- GitHub OTA update engine driven by a JSON manifest file.
-- Local and cloud version numbers displayed on the LED matrix at boot.
-
-v2.2.75 changes (new 511NY signs API migration):
-- Default endpoint -> https://nyapi.carsprogram.org/signs.json (public, no key).
-- Response parser rewritten for the new nested shape:
-    id, name, status, display.pages[].lines[], properties.phaseDwellTime,
-    properties.phaseBlankTime, location.routeId, lastUpdated (epoch ms).
-- Favorites and aliases are now keyed by sign id (e.g. "nyRegion11Signs*505").
-- Old name-based favorites are auto-reset once on first boot after upgrade.
-- Message phases honor each sign's API phaseDwellTime; a web-settable
-  "Override API Dwell Time" checkbox forces page_display_seconds instead.
-- All non-message screens (name, NO MESSAGE, timestamp) use page_display_seconds.
-- Blank / errored signs (status != DISPLAYING_MESSAGE) render "NO MESSAGE".
-- Optional Mode-2 "Data Last Update" screen shown before each sign's message,
-  converted from epoch ms with automatic US-Eastern EST/EDT. Toggle in web UI.
-
-v2.2.76 changes:
-- Hardened sign-cache loader: malformed/old-schema cache rows (missing "id")
-  are skipped so a stale signs_cache.json can never crash the /signs page.
-- Stale (pre-2.2.75) sign cache auto-deleted on boot; click Refresh to rebuild.
-- Proper URL-decoding of unit_name/API fields on save, plus one-time boot
-  sanitize of a previously-stored percent-encoded unit_name (e.g. "Bed%2BUnit").
-- New remote Factory Reset button (Settings > Danger Zone): wipes settings,
-  favorites, aliases and cache to new-in-box state, preserving WiFi secrets.
-
-v2.2.77 changes:
-- Empty-state display: when no favorite signs match the API data, the LED no
-  longer hangs on a stale screen (e.g. the boot unit name). It now shows an
-  amber "No Favorites / Selected" (nothing chosen) or "Favorites / Not Found"
-  (chosen IDs absent from the feed), self-correcting on the next cycle.
-
-v2.2.78 changes:
-- Favorites now MERGE across views. Previously, saving on a filtered /signs
-  page (one roadway, a search, or the favorites view) replaced the entire
-  favorites list with only what was visible, silently wiping selections made
-  on other roadways. Each page now submits a hidden list of the signs it
-  showed; save keeps favorites from other views and applies only the
-  checked/unchecked state of the current view. Aliases merge the same way.
-- Performance / lockout fix: when NO favorites are selected, the main loop now
-  SKIPS the full-feed fetch entirely (it was downloading and parsing ~1000+
-  signs every cycle for nothing, starving the web server and making the UI
-  nearly unreachable). It shows the amber prompt and keeps the web UI
-  responsive; fetching resumes automatically once favorites are saved.
-
-v2.2.84 changes:
-- Sign names now WORD-WRAP (break on spaces) to the display width instead of
-  being truncated. Long names flow onto a second row.
-- New 3-row header per sign: name on rows 1-2 (wrapped), with the sign's
-  last-updated time on row 3 ("Upd M/D/YY H:MMAM TZ") when Show Update Time is
-  enabled. Replaces the old separate name + timestamp screens.
-- Continuous rotation (no more 30s frozen last message): already-fetched signs
-  loop continuously on the LED. The cycle interval now gates only how often the
-  API is re-fetched, not how long a message lingers. Saving favorites still
-  interrupts instantly via the _fetch_now flag.
-- Default log auto-refresh is now 1s (was 5s).
-
-v2.2.85 changes:
-- On-demand message PREVIEW on the Traffic Signs page. When viewing a roadway
-  or search, a "Preview Messages on This Page" button does a one-time live feed
-  fetch and keeps ONLY the messages for the signs on that page (streamed, tiny
-  peak RAM; sign cache is left completely untouched). Tap any sign's Preview
-  button to see its current message in an adjoining pane. Mobile/tablet safe:
-  tap-based (no hover), and the pane stacks to the top on narrow screens.
-- Blank/errored signs show their status in the preview instead of looking empty.
-- Light guard: ignores a new preview request within ~30s of the last one to
-  respect the upstream rate limit (direct users own their own limits).
-
-v2.2.86 changes:
-- Each previewed sign now has TWO buttons: "Preview Here" (web pane, as before)
-  and "Preview On Sign", which flashes that sign's current message on the LED
-  for ~5 seconds then reverts to normal operation. Uses the page/dwell data
-  already captured by the preview fetch, so NO extra network request is made.
-  Only available after a message preview has been loaded for that page.
+v2.2.75: new 511NY signs API migration (nested shape, id-keyed favorites).
+v2.2.76: hardened cache loader, URL-decode fix, Factory Reset.
+v2.2.77: amber empty-state screens.
+v2.2.78: favorites merge across views; skip fetch when no favorites.
+v2.2.84: name word-wrap, 3-row header, continuous rotation, log refresh default.
+v2.2.85: on-demand message PREVIEW (streamed, cache untouched).
+v2.2.86: two preview buttons per sign (Preview Here / Preview On Sign).
+v2.2.87: preview pane narrowed, sign list widened, buttons right-justified.
+v2.2.88: friendly-name box moved left of the preview buttons.
+v2.2.89: scan-quality (bit depth) selectable 1-6; bit_depth printed at boot.
+v2.2.90:
+- Branding: company logo served at /logo.png, shown top-center on every page;
+  footer on every page; Help tab with support email; Log page title -> "Logs".
+- Meta line now shows Model | Firmware | UID | IP | Free RAM, with Free RAM
+  turning amber < 300KB and red < 150KB for at-a-glance troubleshooting.
+- Device UID (immutable microcontroller.cpu.uid) shown in meta line.
+- Nav: Log / Settings / Traffic Signs / Advanced / Help. Sync moved into the
+  Settings > System card. Advanced tab is a placeholder for future features.
+- Hidden /management page (password V#ID?) to set the product model
+  (Kilobyte/Megabyte/Gigabyte/Terabyte/Petabyte) and factory-reset before ship.
+  Reached by URL or the gear button on Settings. (No WiFi-clear yet — that
+  waits for the OOBE/hotspot work.)
+- Log auto-refresh default 3s; editable 1-30s on the Settings page.
+- Brightness help text updated to a TEST FEATURE warning.
+- /signs shows "Refreshing..." during a cache refresh instead of a scary
+  "No sign cache" message if viewed mid-refresh.
+- Reboot page rendered directly (no redirect race) so the UI reliably
+  reconnects after the now-longer boot.
 """
 
 # --- VERSION (keep at top for easy access) ---
-LOCAL_VERSION = "2.2.89"
+LOCAL_VERSION = "2.2.90"
 
 # --- Display color constants (hardware-correct: no software remapping needed) ---
 COLOR_CYAN   = 0x00FFFF  # Informational / in-progress
@@ -115,6 +56,9 @@ COLOR_RED    = 0xFF0000  # Error / failed
 COLOR_AMBER  = 0xFF8800  # Warning / pending reboot
 COLOR_YELLOW = 0xFFFF00  # Data / version numbers
 COLOR_WHITE  = 0xFFFFFF  # Neutral / default
+
+# --- Logo display width (px). Forced 5x of the 107px source per Keith. ---
+LOGO_WIDTH = 535
 
 # --- Imports ---
 import ssl
@@ -257,7 +201,7 @@ _default_settings = {
     "matrix_debug":         False,   # Enable MatrixPortal debug output
     "characters_per_line":  30,      # Text wrapping width
     "brightness":           0.8,     # Display brightness 0.0-1.0
-    "log_refresh_seconds":  1,       # Log page auto-refresh interval (0=disabled)
+    "log_refresh_seconds":  3,       # Log page auto-refresh interval (0=disabled)
     "api_url":              "https://nyapi.carsprogram.org/signs.json",
     "api_key":              "",      # Unused on direct path; for premium Worker path
     "unit_name":            "",      # Friendly name shown on LED at boot (e.g. "BEDSIDE")
@@ -307,8 +251,7 @@ def color_for_display(hex_str):
 
 def url_decode(s):
     """Decode an application/x-www-form-urlencoded value:
-    '+' becomes space, then %XX hex escapes become their character.
-    Used for text fields submitted from the web UI (unit name, API URL, etc.)."""
+    '+' becomes space, then %XX hex escapes become their character."""
     if not s:
         return s
     s = s.replace("+", " ")
@@ -330,9 +273,7 @@ def url_decode(s):
 
 settings = load_settings()
 
-# One-time sanitize: firmware prior to v2.2.76 could store unit_name without
-# URL-decoding, leaving percent escapes like "%2B" visible on the LED. Decode
-# once and re-save if it changed.
+# One-time sanitize of a previously percent-encoded unit_name (pre-2.2.76).
 _raw_unit_name = settings.get("unit_name", "")
 if "%" in _raw_unit_name:
     _fixed_unit_name = url_decode(_raw_unit_name)
@@ -342,7 +283,6 @@ if "%" in _raw_unit_name:
         print("Sanitized unit_name: " + repr(_raw_unit_name) + " -> " + repr(_fixed_unit_name))
 
 # API URL and key — read from settings.json. New signs endpoint is public (no key).
-# api_key is retained only for the premium Worker path (which may use ?key=).
 _api_url = settings.get("api_url", "https://nyapi.carsprogram.org/signs.json")
 _api_key = settings.get("api_key", "")
 NY511_URL = _api_url + _api_key
@@ -385,25 +325,61 @@ def dim(color_int):
 _show_timestamp = [bool(settings.get("show_timestamp", True))]
 _override_dwell = [bool(settings.get("override_api_dwell", False))]
 
+# --- Device identity + product model ---
+def _compute_uid():
+    """Immutable per-chip serial from silicon. Cannot be edited by anyone."""
+    try:
+        return "".join("{:02X}".format(b) for b in microcontroller.cpu.uid)
+    except Exception:
+        return "UNKNOWN"
+DEVICE_UID = _compute_uid()
+
+PRODUCT_FILE  = "product.json"
+PRODUCT_NAMES = ["Kilobyte", "Megabyte", "Gigabyte", "Terabyte", "Petabyte"]
+MGMT_PASSWORD = "V#ID?"   # deterrent-grade management gate (NOT real security)
+
+def load_product_index():
+    try:
+        with open(PRODUCT_FILE, "r") as f:
+            data = json.loads(f.read())
+        idx = int(data.get("product_index", 1))
+        if 0 <= idx < len(PRODUCT_NAMES):
+            return idx
+    except Exception:
+        pass
+    return 1   # default Megabyte
+
+def save_product_index(idx):
+    tmp = PRODUCT_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"product_index": int(idx)}))
+        try:
+            os.remove(PRODUCT_FILE)
+        except OSError:
+            pass
+        os.rename(tmp, PRODUCT_FILE)
+        return True
+    except Exception as e:
+        print("save_product_index failed: " + str(e))
+        return False
+
+_product_index = [load_product_index()]
+
 def _eastern_is_dst(tm):
-    """Approximate US-Eastern DST test from a UTC struct_time. Good enough for a
-    cosmetic timestamp label (only ambiguous within the 2 transition hours/yr).
-    tm_wday: Monday=0 .. Sunday=6."""
+    """Approximate US-Eastern DST test from a UTC struct_time."""
     m = tm.tm_mon
     if m < 3 or m > 11:
         return False
     if 3 < m < 11:
         return True
-    # Date of the most recent Sunday on/before this date:
     last_sunday = tm.tm_mday - ((tm.tm_wday + 1) % 7)
     if m == 3:
-        return last_sunday >= 8    # DST begins 2nd Sunday of March
-    return last_sunday <= 0         # DST ends 1st Sunday of November
+        return last_sunday >= 8
+    return last_sunday <= 0
 
 def epoch_to_local_str(ms):
-    """Convert epoch milliseconds (UTC) to ('M/D/YY H:MMAM', 'EDT'/'EST').
-    time.localtime(secs) performs pure UTC decomposition on CircuitPython
-    (no timezone DB), so we add the Eastern offset ourselves."""
+    """Convert epoch milliseconds (UTC) to ('M/D/YY H:MMAM', 'EDT'/'EST')."""
     try:
         secs = int(ms) // 1000
         if secs <= 0:
@@ -421,19 +397,13 @@ def epoch_to_local_str(ms):
     except Exception:
         return ("UNKNOWN", "ET")
 
-# --- signs.json — favorite sign IDs (replaces name-based list) ---
+# --- signs.json — favorite sign IDs ---
 SIGNS_FILE       = "signs.json"
 SIGNS_CACHE_FILE = "signs_cache.json"
 
 def _stream_parse_signs(resp_obj, on_sign, poll=False):
     """Stream the HTTP body and call on_sign(dict) for each top-level sign
-    object, parsing ONE object at a time so peak RAM stays tiny even for the
-    full (fat) direct-511NY payload. A whole-payload resp.json() needs the raw
-    text AND the parse tree in RAM simultaneously (~1.5 MB) and MemoryErrors on
-    this board. We scan bytes, track string/escape/brace state, and json.loads
-    only each isolated object. Returns count parsed, or -1 on fatal error.
-    Byte-level scan is UTF-8 safe: the ASCII structural bytes (" \\ { }) never
-    collide with UTF-8 multi-byte sequences (all >= 0x80)."""
+    object, parsing ONE object at a time so peak RAM stays tiny."""
     started = False
     depth = 0
     in_str = False
@@ -448,7 +418,7 @@ def _stream_parse_signs(resp_obj, on_sign, poll=False):
                 continue
             for b in chunk:
                 if not started:
-                    if b == 91:  # '['  enter top-level array
+                    if b == 91:  # '['
                         started = True
                     continue
                 if in_str:
@@ -456,12 +426,12 @@ def _stream_parse_signs(resp_obj, on_sign, poll=False):
                         buf.append(b)
                     if esc:
                         esc = False
-                    elif b == 92:  # backslash
+                    elif b == 92:
                         esc = True
-                    elif b == 34:  # closing quote
+                    elif b == 34:
                         in_str = False
                     continue
-                if b == 34:  # opening quote
+                if b == 34:
                     if capturing:
                         buf.append(b)
                     in_str = True
@@ -503,11 +473,9 @@ def _stream_parse_signs(resp_obj, on_sign, poll=False):
         print("stream parse error: " + str(e))
         log_exception(e)
         return -1
-      
+
 def refresh_signs_cache_from_api():
-    """Stream all signs from the API and save a slim cache (id/name/roadway).
-    Uses _stream_parse_signs so the full fat direct payload never has to be
-    held in RAM at once (which MemoryErrors on this board)."""
+    """Stream all signs from the API and save a slim cache (id/name/roadway)."""
     print("Fetching NY511 sign cache...")
     matrixportal.set_text_color(dim(0x00FFFF), 0)
     matrixportal.set_text(center_multiline_string("LOADING\nSIGNS...", characters_per_line), 0)
@@ -575,10 +543,8 @@ def refresh_signs_cache_from_api():
         gc.collect()
 
 def _preview_text_for(sign):
-    """Build a preview record for one streamed sign: a flattened short string
-    ("msg") for the web pane, PLUS the raw page/dwell data so the same message
-    can be rendered on the LED via "Preview On Sign" (no extra network). Only
-    ever called for the handful of signs on one roadway/search page."""
+    """Build a preview record for one streamed sign: flattened string for the
+    web pane + raw page/dwell data for 'Preview On Sign' (no extra network)."""
     status = sign.get("status", "") or "UNKNOWN"
     disp = sign.get("display") or {}
     props = sign.get("properties") or {}
@@ -608,10 +574,7 @@ def _preview_text_for(sign):
     }
 
 def fetch_preview_messages():
-    """Stream the full feed and keep ONLY the messages for the sign IDs in
-    _preview_ids (the signs shown on the current /signs page). Stores results in
-    _preview_data. Peak RAM stays tiny via _stream_parse_signs, and we retain at
-    most ~one roadway's worth of short strings. The sign cache is NOT modified."""
+    """Stream the full feed; keep ONLY messages for IDs in _preview_ids."""
     ids = set(_preview_ids)
     if not ids:
         print("Preview: no ids to fetch.")
@@ -674,7 +637,6 @@ def fetch_preview_messages():
         gc.collect()
 
 def load_favorite_signs():
-    """Load the list of favorite sign IDs from signs.json."""
     try:
         with open(SIGNS_FILE, "r") as f:
             data = json.loads(f.read())
@@ -683,8 +645,6 @@ def load_favorite_signs():
         return []
 
 def load_sign_aliases():
-    """Load the friendly-name aliases dict from signs.json.
-    Returns {"<sign id>": "Friendly name", ...}"""
     try:
         with open(SIGNS_FILE, "r") as f:
             data = json.loads(f.read())
@@ -693,7 +653,6 @@ def load_sign_aliases():
         return {}
 
 def save_favorite_signs(favorites_list, aliases_dict=None):
-    """Save favorites list (and optional aliases dict) to signs.json atomically."""
     tmp = SIGNS_FILE + ".tmp"
     try:
         if aliases_dict is None:
@@ -712,10 +671,6 @@ def save_favorite_signs(favorites_list, aliases_dict=None):
         return False
 
 def load_signs_cache():
-    """Load sign cache from signs_cache.json.
-    Returns list of {"id","name","roadway"} dicts. Any malformed entry
-    (not a dict, or missing "id" — e.g. a pre-2.2.75 name-based cache) is
-    skipped so a stale cache can never crash the /signs page."""
     try:
         with open(SIGNS_CACHE_FILE, "r") as f:
             data = json.loads(f.read())
@@ -733,12 +688,7 @@ def load_signs_cache():
         return []
 
 def save_signs_cache(sign_data):
-    """Save sign data to signs_cache.json atomically.
-    Writes incrementally (one sign at a time) rather than building a single
-    large json.dumps() string. The full direct-511NY payload fragments the
-    heap badly (MicroPython's GC frees but does NOT defragment), so one big
-    contiguous allocation can fail even with plenty of total free RAM. Small
-    per-sign writes fit in the fragmented free holes where a big string won't."""
+    """Save sign data to signs_cache.json atomically, written incrementally."""
     tmp = SIGNS_CACHE_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
@@ -781,8 +731,6 @@ matrixportal.add_text(
     line_spacing=0.8,
     text_color=dim(sign_text_color[0])
 )
-# Note: FramebufferDisplay.brightness only supports 0.0 (off) or 1.0 (full).
-# True brightness is controlled via bit_depth at initialization — see settings.
 w.feed()
 
 # --- Helper Functions ---
@@ -791,11 +739,7 @@ def center_multiline_string(text, width_chars):
     return "\n".join(line.center(width_chars) for line in text.splitlines())
 
 def word_wrap(text, width_chars):
-    """Word-wrap text to at most width_chars per line, breaking on spaces.
-    Honors any explicit newlines already in the text, and hard-splits any
-    single word longer than width_chars. Returns a list of lines (never empty).
-    Used for sign names so long names flow onto a second row instead of being
-    truncated at the panel edge."""
+    """Word-wrap text to at most width_chars per line, breaking on spaces."""
     lines = []
     for raw_line in (str(text).splitlines() or [""]):
         words = raw_line.split()
@@ -829,14 +773,10 @@ def clean_string(text):
     return text.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
 
 def display_sign(match, name_secs, page_secs, lines_per_page=3):
-    """Display one matched sign: optional update-time, then name, then phases.
-    - Message phases use the API phaseDwellTime unless override is enabled.
-    - All non-message info (timestamp, name, NO MESSAGE) uses page_secs."""
+    """Display one matched sign: optional update-time, then name, then phases."""
     if _reboot_pending[0] or _id_flash_pending[0] or _preview_pending[0] or _preview_led_id[0]:
         return
 
-    # --- Combined 3-row header: name word-wrapped across rows 1-2, with the
-    # sign's last-updated time on row 3 (when Show Update Time is enabled). ---
     clean_name = clean_string(match.get("name", ""))
     print(f"Name: {clean_name}")
     if _show_timestamp[0]:
@@ -859,14 +799,12 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
 
     matrixportal.set_text_color(dim(sign_text_color[0]), 0)
 
-    # Blank / errored / message-less signs
     if status != "DISPLAYING_MESSAGE" or not pages:
         matrixportal.set_text(center_multiline_string("NO MESSAGE", characters_per_line), 0)
         safe_delay(page_secs)
         w.feed()
         return
 
-    # Per-phase dwell: API value (seconds) unless override enabled
     if _override_dwell[0]:
         phase_secs = page_secs
     else:
@@ -896,9 +834,7 @@ def display_sign(match, name_secs, page_secs, lines_per_page=3):
             w.feed()
 
 def preview_on_led(pv, hold_secs=5):
-    """Render a previewed sign's current message on the LED for ~hold_secs, then
-    return so the main loop resumes normal operation. Uses the page/dwell data
-    captured during the message preview fetch — no new network request."""
+    """Render a previewed sign's current message on the LED for ~hold_secs."""
     status = pv.get("status", "")
     pages = pv.get("pages", []) or []
     matrixportal.set_text_color(dim(sign_text_color[0]), 0)
@@ -922,7 +858,6 @@ def preview_on_led(pv, hold_secs=5):
     matrixportal.set_text("", 0)
 
 def ensure_dir_exists(filepath):
-    """Creates all parent directories for filepath using single-level os.mkdir()."""
     parts = filepath.split("/")
     if len(parts) > 1:
         current_path = ""
@@ -931,7 +866,7 @@ def ensure_dir_exists(filepath):
             try:
                 os.mkdir(current_path)
             except OSError as e:
-                if e.errno != 17:  # 17 = EEXIST
+                if e.errno != 17:
                     raise
 
 # --- Raw Socket Rescue Web Server ---
@@ -939,8 +874,6 @@ rescue_socket = None
 server = None
 
 def start_rescue_server():
-    """Binds a raw TCP socket on port 80 to serve the log page when
-    adafruit_httpserver is unavailable."""
     global rescue_socket, pool
     if rescue_socket is not None:
         return
@@ -965,7 +898,6 @@ def start_rescue_server():
         rescue_socket = None
 
 def safe_send(conn, data):
-    """Sends bytes/string over a TCP connection, retrying on EAGAIN (errno 11)."""
     if isinstance(data, str):
         data = data.encode("utf-8")
     sent_total = 0
@@ -976,13 +908,12 @@ def safe_send(conn, data):
                 break
             sent_total += sent
         except OSError as e:
-            if e.errno == 11:  # EAGAIN
+            if e.errno == 11:
                 time.sleep(0.01)
                 continue
             raise
 
 def poll_rescue_server():
-    """Non-blocking poll: accepts one connection, sends the full log page, closes."""
     global rescue_socket
     if rescue_socket is None:
         return
@@ -1034,6 +965,7 @@ def poll_rescue_server():
             "</style></head><body>"
             "<h1>&#x1F6A8; Matrix Portal S3 &mdash; Rescue Console</h1>"
             "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
+            " &nbsp;|&nbsp; UID: " + DEVICE_UID +
             " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
             " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
             "<h2>Log Output:</h2>"
@@ -1068,7 +1000,6 @@ def poll_rescue_server():
         gc.collect()
 
 def poll_server():
-    """Poll the active web server once, feeding the watchdog before and after."""
     if HAS_HTTPSERVER and server is not None:
         try:
             w.feed()
@@ -1082,25 +1013,23 @@ def poll_server():
         poll_rescue_server()
 
 # --- Shared mutable flags ---
-_calib_state          = {"active": False}
+_calib_state           = {"active": False}
 _refresh_cache_pending = [False]
+_refresh_in_progress   = [False]   # True while a cache refresh is actively running
 _reboot_pending        = [False]
 _id_flash_pending      = [False]
 _signs_filter          = [""]
 _signs_show_all        = [False]
 _api_error             = [""]
 _signs_page            = [0]
-_signs_show_all        = [False]
 _fetch_now             = [False]   # set when favorites saved -> fetch immediately
 _preview_pending       = [False]   # set when user requests a message preview fetch
 _preview_ids           = []        # sign ids shown on the current /signs page
-_preview_data          = {}        # id -> {"status":..., "msg":...} from last preview
+_preview_data          = {}        # id -> preview record from last preview
 _preview_last          = [0.0]     # time.monotonic() of last completed preview
 _preview_led_id        = [""]      # id to flash on the LED from the preview page
 
 def safe_delay(seconds):
-    """Sleeps for `seconds` while feeding the watchdog and polling the web server.
-    Exits early if a pending web action is set so it is handled promptly."""
     start = time.monotonic()
     while time.monotonic() - start < seconds:
         poll_server()
@@ -1118,7 +1047,6 @@ def safe_delay(seconds):
 
 # --- WiFi Connection ---
 def connect_wifi():
-    """Connects to WiFi, showing status on the matrix display."""
     w.feed()
     if wifi.radio.connected:
         return True
@@ -1312,8 +1240,6 @@ def perform_ota_check(requests_session, force=False):
                 gc.collect()
 
         # --- OTA SELF-VALIDATION: compile every staged .py on-device before swap ---
-        # CPython ast.parse CANNOT catch MicroPython-specific syntax; the device's
-        # own compile() can. A bad push can no longer brick a field unit.
         print("Validating staged files (on-device compile)...")
         for temp_path, final_path in successful_swaps:
             if not final_path.endswith(".py"):
@@ -1414,7 +1340,7 @@ def html_head(title):
         "white-space:pre-wrap;overflow-x:auto;margin:0;}"
         "button{font-family:monospace;font-size:1em;padding:8px 18px;"
         "border:none;border-radius:4px;cursor:pointer;margin:4px;}"
-        "input[type=text],input[type=number]{"
+        "input[type=text],input[type=number],input[type=password]{"
         "font-family:monospace;font-size:1em;padding:6px 10px;"
         "background:#222;color:#eee;border:1px solid #555;border-radius:4px;width:80px;}"
         "select{font-family:monospace;font-size:1em;padding:6px 10px;"
@@ -1463,42 +1389,64 @@ def html_head(title):
         ".signs-right{order:-1;width:100%;flex:0 0 auto;}"
         ".preview-pane{min-height:90px;position:sticky;top:0;z-index:10;}"
         "}"
-        "</style></head>"
+        "</style>"
+        "<script>document.addEventListener('DOMContentLoaded',function(){"
+        "var f=document.createElement('div');"
+        "f.style.cssText='text-align:center;color:#666;font-size:0.8em;"
+        "margin-top:30px;padding:15px 0;border-top:1px solid #222';"
+        "f.innerHTML='Created by Keith Elkin. &copy; 2026 Byte Me Electronics, LLC. All rights reserved.';"
+        "document.body.appendChild(f);});</script>"
+        "</head>"
     )
+
+def html_logo():
+    return ('<div style="text-align:center;margin:10px 0">'
+            '<img src="/logo.png" alt="Byte Me Electronics" '
+            'style="width:' + str(LOGO_WIDTH) + 'px;max-width:100%;height:auto" '
+            'onerror="this.style.display=\'none\'"></div>')
 
 def html_nav(active):
     tabs = [("log","/","&#x1F4CB; Log"),
             ("settings","/settings","&#x2699;&#xFE0F; Settings"),
             ("signs","/signs","&#x1F6A6; Traffic Signs"),
-            ("sync","/sync","&#x1F4E1; Sync")]
+            ("advanced","/advanced","&#x1F527; Advanced"),
+            ("help","/help","&#x2753; Help")]
     nav = "<nav>"
     for key, href, label in tabs:
         cls = " class=\"active\"" if active == key else ""
         nav += "<a href=\"" + href + "\"" + cls + ">" + label + "</a>"
     nav += "</nav>"
+    nav += html_logo()
     return nav
 
 def html_meta():
+    free = gc.mem_free()
+    if free < 150000:
+        ram_color = "#ff3333"
+    elif free < 300000:
+        ram_color = "#ffaa00"
+    else:
+        ram_color = "#888"
     return (
-        "<div class=\"meta\">Firmware: v" + LOCAL_VERSION +
+        "<div class=\"meta\">Model: " + PRODUCT_NAMES[_product_index[0]] +
+        " &nbsp;|&nbsp; Firmware: v" + LOCAL_VERSION +
+        " &nbsp;|&nbsp; UID: " + DEVICE_UID +
         " &nbsp;|&nbsp; IP: " + str(wifi.radio.ipv4_address) +
-        " &nbsp;|&nbsp; Free RAM: " + str(gc.mem_free()) + " bytes</div>"
+        " &nbsp;|&nbsp; <span style=\"color:" + ram_color + "\">Free RAM: " +
+        str(free) + " bytes</span></div>"
     )
 
 def secs_to_hms(total):
-    """Convert total seconds integer to (h, m, s) tuple."""
     h = total // 3600
     m = (total % 3600) // 60
     s = total % 60
     return h, m, s
 
 def hms_to_secs(h, m, s):
-    """Convert h/m/s to total seconds, clamped to minimum 1 second."""
     total = int(h) * 3600 + int(m) * 60 + int(s)
     return max(1, total)
 
 def parse_post_body(request):
-    """Parse a URL-encoded POST body into a dict of key->value strings."""
     params = {}
     try:
         body_str = request.body.decode("utf-8") if request.body else ""
@@ -1511,7 +1459,6 @@ def parse_post_body(request):
     return params
 
 def _parse_color_field(post_params, key, fallback):
-    """Extract and validate a hex color value from POST params."""
     v = post_params.get(key, settings.get(key, fallback))
     v = v.replace("%23", "#")
     if not v.startswith("#"):
@@ -1519,7 +1466,6 @@ def _parse_color_field(post_params, key, fallback):
     return v if len(v) == 7 else settings.get(key, fallback)
 
 def _is_too_bright(hex_color):
-    """Returns True if all three channels are above 0xC0 (75%) — near-white."""
     try:
         r = int(hex_color[1:3], 16)
         g = int(hex_color[3:5], 16)
@@ -1529,14 +1475,10 @@ def _is_too_bright(hex_color):
         return False
 
 def _html_escape(s):
-    """Escape a string for safe inclusion in HTML text or a double-quoted attr."""
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 def _filter_signs(query, cached, favs):
-    """Return the list of cached signs matching the current /signs filter, or
-    None for the default landing view. Shared by /signs and /preview-signs so
-    both always agree on exactly which signs a page shows."""
     if query == "__favorites__":
         return sorted([s for s in cached if s.get("id") in favs],
                       key=lambda s: s.get("name", ""))
@@ -1552,6 +1494,36 @@ def _filter_signs(query, cached, favs):
     else:
         return None
 
+def _management_panel(msg):
+    idx = _product_index[0]
+    opts = ""
+    for i, nm in enumerate(PRODUCT_NAMES):
+        sel = " selected" if i == idx else ""
+        opts += '<option value="' + str(i) + '"' + sel + '>' + nm + '</option>'
+    return (
+        html_head("Management") +
+        "<body>" + html_nav("") +
+        "<h1>&#x1F510; Management</h1>" + html_meta() +
+        (("<div class=\"card\"><p class=\"status-ok\">" + msg + "</p></div>") if msg else "") +
+        "<div class=\"card\"><h2>Product Model</h2>"
+        "<form method=\"POST\" action=\"/management-save\">"
+        "<input type=\"hidden\" name=\"pw\" value=\"" + MGMT_PASSWORD + "\">"
+        "<select name=\"product_index\">" + opts + "</select> "
+        "<button class=\"btn-green\" type=\"submit\">Save Model</button>"
+        "</form>"
+        "<p style=\"color:#888;font-size:0.85em;margin-top:8px\">UID: " + DEVICE_UID + "</p>"
+        "</div>"
+        "<div class=\"card\" style=\"border:2px solid #cc2222\">"
+        "<h2 style=\"color:#ff5555\">Factory Reset</h2>"
+        "<p style=\"color:#aaa\">Erases settings, favorites, aliases, and the sign cache. "
+        "WiFi credentials are preserved.</p>"
+        "<form method=\"POST\" action=\"/factory-reset\" "
+        "onsubmit=\"return confirm('Factory reset this unit?');\">"
+        "<button class=\"btn-red\" type=\"submit\">&#x1F6A8; Factory Reset</button>"
+        "</form></div>"
+        "</body></html>"
+    )
+
 
 # --- Start adafruit_httpserver if available ---
 if HAS_HTTPSERVER and pool is not None:
@@ -1564,27 +1536,42 @@ if HAS_HTTPSERVER and pool is not None:
         except Exception:
             pass
 
+        # ── GET /logo.png — serve the branding image (cached 24h) ─────────
+        @server.route("/logo.png", GET)
+        def route_logo(request):
+            try:
+                with open("logo.png", "rb") as f:
+                    data = f.read()
+                return Response(request, content_type="image/png",
+                                headers={"Cache-Control": "max-age=86400",
+                                         "Connection": "close"},
+                                body=data)
+            except Exception:
+                return Response(request, status=(404, "Not Found"),
+                                content_type="text/plain",
+                                headers={"Connection": "close"}, body="")
+
         # ── GET / — Log page ──────────────────────────────────────────────
         @server.route("/", GET)
         def route_index(request):
             logs_html = (web_logger.get_logs()
                          .replace("&","&amp;").replace("<","&lt;").replace(">","&gt;"))
-            log_refresh = int(settings.get("log_refresh_seconds", 5))
+            log_refresh = int(settings.get("log_refresh_seconds", 3))
             refresh_meta = ('<meta http-equiv="refresh" content="' + str(log_refresh) + '">'
                            if log_refresh > 0 else "")
-            head = html_head("Matrix Portal S3 - Log")
+            head = html_head("Logs")
             if refresh_meta:
                 head = head.replace("</head>", refresh_meta + "</head>")
             body = (
                 head +
                 "<body>" + html_nav("log") +
-                "<h1>&#x1F6A8; Matrix Portal S3</h1>" + html_meta() +
+                "<h1>&#x1F6A8; Logs</h1>" + html_meta() +
                 "<div style=\"margin-bottom:8px;color:#888;font-size:0.85em\">"
                 + ("Auto-refreshing every " + str(log_refresh) + "s &nbsp;"
                    "<a href=\"/log-refresh/0\" style=\"color:#555\">Pause</a>"
                    if log_refresh > 0 else
                    "Auto-refresh paused &nbsp;"
-                   "<a href=\"/log-refresh/5\" style=\"color:#00ccff\">Resume (5s)</a>")
+                   "<a href=\"/log-refresh/3\" style=\"color:#00ccff\">Resume (3s)</a>")
                 + "</div>"
                 "<div class=\"card\"><h2>Log Output:</h2>"
                 "<pre>" + logs_html + "</pre></div>"
@@ -1634,30 +1621,30 @@ if HAS_HTTPSERVER and pool is not None:
             return Response(request, status=(303, "See Other"),
                           headers={"Location": "/", "Connection": "close"}, body="")
 
-        # ── GET /rebooting ────────────────────────────────────────────────
+        # ── GET /rebooting (kept for compatibility) ───────────────────────
         @server.route("/rebooting", GET)
         def route_rebooting(request):
             body = (
                 html_head("Rebooting...") +
-                "<body>" + html_nav("log") +
+                "<body>" + html_nav("") +
                 "<h1>&#x1F6A8; Rebooting...</h1>"
                 "<p style=\"color:#aaa\">Board is restarting. Waiting for it to come back...</p>"
                 "<p id=\"status\" style=\"color:#ffaa00\">&#x23F3; Connecting...</p>"
                 "<script>"
                 "function tryReconnect(){"
-                "  fetch('/').then(function(r){"
+                "  fetch('/',{cache:'no-store'}).then(function(r){"
                 "    if(r.ok){window.location='/';}"
-                "    else{setTimeout(tryReconnect,2000);}"
-                "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                "    else{setTimeout(tryReconnect,3000);}"
+                "  }).catch(function(){setTimeout(tryReconnect,3000);})"
                 "}"
-                "setTimeout(tryReconnect,3000);"
+                "setTimeout(tryReconnect,8000);"
                 "</script>"
                 "</body></html>"
             )
             return Response(request, content_type="text/html",
                           headers={"Connection":"close"}, body=body)
 
-        # ── POST /reboot ──────────────────────────────────────────────────
+        # ── POST /reboot — render the patient polling page directly ────────
         @server.route("/reboot", "POST")
         def route_reboot(request):
             print("Reboot requested via web UI.")
@@ -1666,11 +1653,28 @@ if HAS_HTTPSERVER and pool is not None:
                 matrixportal.set_text(center_multiline_string("REBOOT\nPENDING", characters_per_line), 0)
             except Exception:
                 pass
+            body = (
+                html_head("Rebooting...") +
+                "<body>" + html_nav("") +
+                "<h1>&#x1F6A8; Rebooting...</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Board is restarting. This can take up to a minute. "
+                "Waiting for it to come back online...</p>"
+                "<p id=\"status\" style=\"color:#ffaa00\">&#x23F3; Connecting...</p>"
+                "<script>"
+                "function tryReconnect(){"
+                "  fetch('/',{cache:'no-store'}).then(function(r){"
+                "    if(r.ok){window.location='/';}"
+                "    else{setTimeout(tryReconnect,3000);}"
+                "  }).catch(function(){setTimeout(tryReconnect,3000);})"
+                "}"
+                "setTimeout(tryReconnect,8000);"
+                "</script>"
+                "</div></body></html>"
+            )
             _reboot_pending[0] = True
-            return Response(request,
-                          status=(303, "See Other"),
-                          headers={"Location": "/rebooting", "Connection": "close"},
-                          body="")
+            return Response(request, content_type="text/html",
+                          headers={"Connection":"close"}, body=body)
 
         # ── POST /factory-reset ───────────────────────────────────────────
         @server.route("/factory-reset", "POST")
@@ -1690,7 +1694,7 @@ if HAS_HTTPSERVER and pool is not None:
             _reboot_pending[0] = True
             body = (
                 html_head("Factory Reset") +
-                "<body>" + html_nav("settings") +
+                "<body>" + html_nav("") +
                 "<h1>&#x1F6A8; Factory Reset</h1>" + html_meta() +
                 "<div class=\"card\">"
                 "<p class=\"status-ok\">All custom settings, favorites, aliases, and the "
@@ -1700,12 +1704,12 @@ if HAS_HTTPSERVER and pool is not None:
                 "<p id=\"status\" style=\"color:#888\">Waiting for board...</p>"
                 "<script>"
                 "function tryReconnect(){"
-                "  fetch('/').then(function(r){"
+                "  fetch('/',{cache:'no-store'}).then(function(r){"
                 "    if(r.ok){window.location='/';}"
-                "    else{setTimeout(tryReconnect,2000);}"
-                "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                "    else{setTimeout(tryReconnect,3000);}"
+                "  }).catch(function(){setTimeout(tryReconnect,3000);})"
                 "}"
-                "setTimeout(tryReconnect,6000);"
+                "setTimeout(tryReconnect,8000);"
                 "</script>"
                 "</div></body></html>"
             )
@@ -1730,6 +1734,91 @@ if HAS_HTTPSERVER and pool is not None:
             return Response(request, content_type="text/html",
                             headers={"Connection": "close"}, body=body)
 
+        # ── GET /advanced — placeholder tab ───────────────────────────────
+        @server.route("/advanced", GET)
+        def route_advanced(request):
+            body = (
+                html_head("Advanced") +
+                "<body>" + html_nav("advanced") +
+                "<h1>&#x1F527; Advanced</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Advanced features will appear here in a future "
+                "update.</p>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /help ─────────────────────────────────────────────────────
+        @server.route("/help", GET)
+        def route_help(request):
+            body = (
+                html_head("Help") +
+                "<body>" + html_nav("help") +
+                "<h1>&#x2753; Help</h1>" + html_meta() +
+                "<div class=\"card\" style=\"text-align:center\">"
+                "<p style=\"color:#aaa;font-size:1.1em;margin-top:10px\">For technical support, "
+                "please email <a href=\"mailto:support@bytemeelectronics.com\" "
+                "style=\"color:#00ccff\">support@bytemeelectronics.com</a></p>"
+                "</div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── GET /management — password prompt ─────────────────────────────
+        @server.route("/management", GET)
+        def route_management(request):
+            body = (
+                html_head("Management") +
+                "<body>" + html_nav("") +
+                "<h1>&#x1F510; Management</h1>" + html_meta() +
+                "<div class=\"card\">"
+                "<p style=\"color:#aaa\">Restricted area. Enter the management password.</p>"
+                "<form method=\"POST\" action=\"/management\">"
+                "<input type=\"password\" name=\"pw\" placeholder=\"Password\" "
+                "style=\"width:200px\">"
+                "<button class=\"btn-cyan\" type=\"submit\">Unlock</button>"
+                "</form></div></body></html>"
+            )
+            return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
+        # ── POST /management — validate + show panel ──────────────────────
+        @server.route("/management", "POST")
+        def route_management_post(request):
+            p = parse_post_body(request)
+            pw = url_decode(p.get("pw", ""))
+            if pw != MGMT_PASSWORD:
+                body = (
+                    html_head("Management") +
+                    "<body>" + html_nav("") +
+                    "<h1>&#x1F510; Management</h1>" + html_meta() +
+                    "<div class=\"card\"><p class=\"status-err\">Incorrect password.</p>"
+                    "<a href=\"/management\"><button class=\"btn-gray\">&#x2190; Try again</button></a>"
+                    "</div></body></html>"
+                )
+                return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+            return Response(request, content_type="text/html",
+                            headers={"Connection":"close"}, body=_management_panel(""))
+
+        # ── POST /management-save — save product model ────────────────────
+        @server.route("/management-save", "POST")
+        def route_management_save(request):
+            p = parse_post_body(request)
+            pw = url_decode(p.get("pw", ""))
+            if pw != MGMT_PASSWORD:
+                return Response(request, status=(303, "See Other"),
+                                headers={"Location": "/management", "Connection": "close"}, body="")
+            try:
+                idx = int(p.get("product_index", _product_index[0]))
+                if 0 <= idx < len(PRODUCT_NAMES):
+                    _product_index[0] = idx
+                    save_product_index(idx)
+                    msg = "Model set to " + PRODUCT_NAMES[idx] + "."
+                else:
+                    msg = "Invalid model."
+            except Exception as e:
+                msg = "Error: " + str(e)
+            return Response(request, content_type="text/html",
+                            headers={"Connection":"close"}, body=_management_panel(msg))
+
         # ── GET /settings ─────────────────────────────────────────────────
         @server.route("/settings", GET)
         def route_settings(request):
@@ -1740,7 +1829,6 @@ if HAS_HTTPSERVER and pool is not None:
             m_h, m_m, m_s = secs_to_hms(int(settings.get("msg_display_seconds", 10)))
             p_h, p_m, p_s = secs_to_hms(int(settings.get("page_display_seconds", 5)))
             c_h, c_m, c_s = secs_to_hms(int(settings.get("cycle_sleep_seconds", 30)))
-            cur_m_h, cur_m_m, cur_m_s = m_h, m_m, m_s
 
             order_opts = ""
             for o in VALID_COLOR_ORDERS:
@@ -1769,14 +1857,18 @@ if HAS_HTTPSERVER and pool is not None:
                 if _api_error[0] else ""
                 ) +
 
-                # Reboot + ID flash
+                # System card: Reboot + ID + Sync + Management gear
                 "<div class=\"card\"><h2>System</h2>"
                 "<form method=\"POST\" action=\"/reboot\" style=\"display:inline\">"
                 "<button class=\"btn-red\" type=\"submit\">&#x1F504; Reboot Board</button>"
                 "</form>"
                 "&nbsp;<form method=\"POST\" action=\"/identify\" style=\"display:inline\">"
                 "<button class=\"btn-yellow\" type=\"submit\">&#x1F4A1; ID This Sign</button>"
-                "</form></div>"
+                "</form>"
+                "&nbsp;<a href=\"/sync\"><button class=\"btn-cyan\" type=\"button\">&#x1F4E1; Sync</button></a>"
+                "&nbsp;<a href=\"/management\" title=\"Management\"><button class=\"btn-gray\" "
+                "type=\"button\">&#x2699;&#xFE0F;</button></a>"
+                "</div>"
 
                 # All settings in one form
                 "<div class=\"card\"><h2>Display Settings</h2>"
@@ -1791,10 +1883,12 @@ if HAS_HTTPSERVER and pool is not None:
                     for v in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 ) +
                 "</select>"
-                "<small style=\"color:#888;margin-left:8px\">Applied immediately, no reboot needed</small>"
+                "<small style=\"color:#888;margin-left:8px\">TEST FEATURE: Values less than 80% "
+                "are not recommended and may display incorrect colors or invisible text. "
+                "80% is recommended.</small>"
                 "</div>"
 
-               "<div class=\"row\"><label>Scan Quality:</label>"
+                "<div class=\"row\"><label>Scan Quality:</label>"
                 "<select name=\"depth\">"
                 + "".join(
                     '<option value="' + str(d) + '"' +
@@ -1804,8 +1898,8 @@ if HAS_HTTPSERVER and pool is not None:
                     for d in [1, 2, 3, 4, 5, 6]
                 ) +
                 "</select>"
-                "<small style=\"color:#888;margin-left:8px\">Lower = faster refresh / less flicker but fewer colors "
-                "(amber shifts toward yellow at 1-2). Requires reboot.</small>"
+                "<small style=\"color:#888;margin-left:8px\">Lower = faster refresh / less flicker "
+                "but fewer colors (amber shifts toward yellow at 1-2). Requires reboot.</small>"
                 "</div>"
 
                 "<div class=\"row\"><label>Color Order:</label>"
@@ -1858,6 +1952,13 @@ if HAS_HTTPSERVER and pool is not None:
                 (" checked" if settings.get("override_api_dwell", False) else "") +
                 "> <small style=\"color:#888\">Use Page display time for message phases instead "
                 "of the dwell time published with each sign</small>"
+                "</div>"
+
+                "<div class=\"row\"><label>Log Refresh:</label>"
+                "<input type=\"number\" name=\"log_refresh\" value=\"" +
+                str(settings.get("log_refresh_seconds", 3)) +
+                "\" min=\"1\" max=\"30\" style=\"width:55px\"> seconds"
+                "<small style=\"color:#888;margin-left:8px\">Log page auto-refresh (1-30s)</small>"
                 "</div>"
 
                 "<div class=\"row\"><label>API URL:</label>"
@@ -1939,6 +2040,10 @@ if HAS_HTTPSERVER and pool is not None:
                     new_depth = max(1, min(6, int(p.get("depth", settings.get("depth", 6)))))
                 except Exception:
                     new_depth = int(settings.get("depth", 6))
+                try:
+                    new_log_refresh = max(1, min(30, int(p.get("log_refresh", settings.get("log_refresh_seconds", 3)))))
+                except Exception:
+                    new_log_refresh = int(settings.get("log_refresh_seconds", 3))
 
                 new_color      = _parse_color_field(p, "sign_text_color", "#F7B500")
                 new_name_color = _parse_color_field(p, "sign_name_color",  "#0000FF")
@@ -1968,6 +2073,7 @@ if HAS_HTTPSERVER and pool is not None:
                 needs_reboot = (new_order != color_order or new_depth != int(settings.get("depth", 6)))
 
                 settings["depth"]                = new_depth
+                settings["log_refresh_seconds"]  = new_log_refresh
                 if new_api_url != settings.get("api_url","") or new_api_key != settings.get("api_key",""):
                     _api_error[0] = ""
                     print("API URL/key changed — clearing error flag, fetching will resume.")
@@ -1998,7 +2104,6 @@ if HAS_HTTPSERVER and pool is not None:
 
                 ok = save_settings(settings)
 
-                # Apply non-color-order changes immediately (no reboot needed)
                 name_disp_secs   = new_name_secs
                 msg_disp_secs    = new_msg_secs
                 page_disp_secs   = new_page_secs
@@ -2023,7 +2128,8 @@ if HAS_HTTPSERVER and pool is not None:
                       + " msg_color=" + new_color + " name_color=" + new_name_color
                       + " name=" + str(new_name_secs) + "s msg=" + str(new_msg_secs)
                       + "s cycle=" + str(new_cycle_secs) + "s"
-                      + " show_ts=" + str(new_show_ts) + " override_dwell=" + str(new_override_dwell))
+                      + " show_ts=" + str(new_show_ts) + " override_dwell=" + str(new_override_dwell)
+                      + " log_refresh=" + str(new_log_refresh))
             except Exception as e:
                 status = "Error: " + str(e)
                 cls = "status-err"
@@ -2045,10 +2151,28 @@ if HAS_HTTPSERVER and pool is not None:
         # ── GET /signs — Traffic Signs page ───────────────────────────────
         @server.route("/signs", GET)
         def route_signs(request):
+            # Guard: if a cache refresh is queued/running, show a wait page
+            # instead of the alarming "No sign cache" during the write window.
+            if _refresh_cache_pending[0] or _refresh_in_progress[0]:
+                head = html_head("Refreshing Signs...")
+                head = head.replace("</head>", '<meta http-equiv="refresh" content="5"></head>')
+                body = (
+                    head +
+                    "<body>" + html_nav("signs") +
+                    "<h1>&#x1F6A6; Traffic Signs</h1>" + html_meta() +
+                    "<div class=\"card\">"
+                    "<p style=\"color:#ffaa00\">&#x23F3; Refreshing sign list from 511NY, "
+                    "please wait...</p>"
+                    "<p style=\"color:#aaa\">This page updates automatically when the refresh "
+                    "completes (up to 90 seconds).</p>"
+                    "</div></body></html>"
+                )
+                return Response(request, content_type="text/html", headers={"Connection":"close"}, body=body)
+
             query   = _signs_filter[0]
             cached  = load_signs_cache()
-            favs    = set(load_favorite_signs())   # set of IDs
-            aliases = load_sign_aliases()          # {id: friendly}
+            favs    = set(load_favorite_signs())
+            aliases = load_sign_aliases()
             w.feed()
 
             all_items = _filter_signs(query, cached, favs)
@@ -2111,13 +2235,9 @@ if HAS_HTTPSERVER and pool is not None:
                         'background:#1a1a1a;color:#ffaa00;border:1px solid #444;border-radius:3px;'
                         'font-family:monospace;" title="Friendly name shown on LED instead of the sign name">'
                     ) if sid in favs else ""
-                    # Preview message (if a preview fetch has run for this sign)
                     pv = _preview_data.get(sid)
                     pv_msg = _html_escape(pv.get("msg", "")) if pv else ""
                     pv_status = _html_escape(pv.get("status", "")) if pv else ""
-                    # Hidden "shown" field lets the save handler know which signs
-                    # this view presented, so it can merge (not wipe) favorites
-                    # selected on other roadways/searches.
                     items_parts.append(
                         '<div class="sign-item' + fav_cls + '" '
                         'data-id="' + safe_id + '" '
@@ -2178,7 +2298,6 @@ if HAS_HTTPSERVER and pool is not None:
                 else:
                     breadcrumb = ""
 
-                # Preview button + two-pane layout (tap a sign to preview)
                 preview_loaded = False
                 for s in all_items:
                     if s.get("id") in _preview_data:
@@ -2359,7 +2478,6 @@ if HAS_HTTPSERVER and pool is not None:
         def route_preview_signs(request):
             now = time.monotonic()
             if not _preview_pending[0]:
-                # Light rate-limit guard (respects upstream 1x/5min recommendation)
                 if _preview_last[0] and (now - _preview_last[0]) < 30:
                     body = (
                         html_head("Preview") +
@@ -2473,11 +2591,6 @@ if HAS_HTTPSERVER and pool is not None:
                             if raw_key and raw_val:
                                 aliases_new[raw_key] = raw_val
 
-                # --- MERGE favorites across views ---
-                # Start from the existing saved favorites. Remove any that were
-                # shown on THIS page (so deselections take effect), then add the
-                # ones checked on this page. Favorites from other roadways/
-                # searches that weren't shown here are left untouched.
                 old_favs = load_favorite_signs()
                 shown_set = set(shown)
                 merged = [f for f in old_favs if f not in shown_set]
@@ -2485,7 +2598,6 @@ if HAS_HTTPSERVER and pool is not None:
                     if sid not in merged:
                         merged.append(sid)
 
-                # --- MERGE aliases the same way ---
                 old_aliases = load_sign_aliases()
                 for sid in shown_set:
                     old_aliases.pop(sid, None)
@@ -2493,8 +2605,8 @@ if HAS_HTTPSERVER and pool is not None:
 
                 ok = save_favorite_signs(merged, old_aliases)
                 favsign_list = merged
-                _fetch_now[0] = True   # interrupt cycle sleep -> show changes now
-              
+                _fetch_now[0] = True
+
                 added_here = len(selected)
                 status = ("Saved. " + str(len(merged)) + " total favorite sign(s) ("
                           + str(added_here) + " selected on this view).")
@@ -2543,12 +2655,12 @@ if HAS_HTTPSERVER and pool is not None:
                     "<p id=\"status\" style=\"color:#888\">&#x23F3; Waiting for board...</p>"
                     "<script>"
                     "function tryReconnect(){"
-                    "  fetch('/').then(function(r){"
+                    "  fetch('/',{cache:'no-store'}).then(function(r){"
                     "    if(r.ok){window.location='/settings';}"
-                    "    else{setTimeout(tryReconnect,2000);}"
-                    "  }).catch(function(){setTimeout(tryReconnect,2000);})"
+                    "    else{setTimeout(tryReconnect,3000);}"
+                    "  }).catch(function(){setTimeout(tryReconnect,3000);})"
                     "}"
-                    "setTimeout(tryReconnect,6000);"
+                    "setTimeout(tryReconnect,8000);"
                     "</script>"
                     "</div></body></html>"
                 )
@@ -2744,7 +2856,7 @@ if HAS_HTTPSERVER and pool is not None:
         def route_sync_page(request):
             body = (
                 html_head("Matrix Portal S3 - Sync") +
-                "<body>" + html_nav("sync") +
+                "<body>" + html_nav("") +
                 "<h1>&#x1F4E1; Sync from Another Unit</h1>" + html_meta() +
                 "<div class=\"card\">"
                 "<p style=\"color:#aaa\">Enter the IP address of the source unit "
@@ -2790,7 +2902,7 @@ if HAS_HTTPSERVER and pool is not None:
             do_signs    = p.get("sync_signs", "")    == "1"
 
             if not source_ip:
-                body = (html_head("Sync Error") + "<body>" + html_nav("sync") +
+                body = (html_head("Sync Error") + "<body>" + html_nav("") +
                         "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
                         "<div class=\"card\"><p class=\"status-err\">No source IP provided.</p>"
                         "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back</button></a>"
@@ -2871,7 +2983,7 @@ if HAS_HTTPSERVER and pool is not None:
             status_html = "<br>".join(status_lines)
             body = (
                 html_head("Sync Complete") +
-                "<body>" + html_nav("sync") +
+                "<body>" + html_nav("") +
                 "<h1>&#x1F4E1; Sync</h1>" + html_meta() +
                 "<div class=\"card\"><p class=\"" + cls + "\">" + status_html + "</p>"
                 "<a href=\"/sync\"><button class=\"btn-gray\">&#x2190; Back to Sync</button></a>"
@@ -2891,17 +3003,11 @@ if HAS_HTTPSERVER and pool is not None:
 
 # --- Load Favorite Signs List ---
 favsign_list = load_favorite_signs()
-# Migration: pre-2.2.75 favorites were keyed by sign NAME. New API keys by ID,
-# which always contains "*". If any stored favorite lacks "*", it's old-format —
-# reset favorites (and aliases) once so the user re-selects on the new API.
 if favsign_list and not all("*" in str(f) for f in favsign_list):
     print("Old-format (name-based) favorites detected. Resetting for new API.")
     save_favorite_signs([], {})
     favsign_list = []
 
-# Migration: a pre-2.2.75 signs_cache.json used a flat/name-based schema with
-# no "id" field. load_signs_cache() now skips malformed rows, but we also
-# physically delete a stale-schema cache so a clean one is fetched on Refresh.
 try:
     with open(SIGNS_CACHE_FILE, "r") as _cf:
         _cache_rows = json.loads(_cf.read()).get("signs", [])
@@ -2922,14 +3028,10 @@ else:
     print("Visit the Traffic Signs tab on the web UI to select signs.")
 
 # --- Main Loop ---
-# v2.2.84 Option C: the API is re-fetched at most once every cycle_sleep_secs,
-# but the already-matched signs rotate continuously on the LED in between, so
-# the last message never freezes on screen for the whole interval. Saving
-# favorites sets _fetch_now, which interrupts the current pass and refetches.
 cycles = 0
-matched_signs = []      # cached across iterations for continuous rotation
-last_fetch = 0.0        # time.monotonic() of the last fetch attempt
-have_fetched = False    # True once at least one fetch has completed
+matched_signs = []
+last_fetch = 0.0
+have_fetched = False
 w.feed()
 
 while True:
@@ -2940,18 +3042,19 @@ while True:
     w.feed()
     gc.collect()
 
-    # --- Pending web-UI actions ---
     if _reboot_pending[0]:
         _reboot_pending[0] = False
         print("Rebooting as requested by web UI...")
-        time.sleep(0.5)
+        time.sleep(1.0)
         import supervisor
         supervisor.reload()
 
     if _refresh_cache_pending[0]:
         _refresh_cache_pending[0] = False
         if wifi.radio.connected and requests is not None:
+            _refresh_in_progress[0] = True
             ok_cache = refresh_signs_cache_from_api()
+            _refresh_in_progress[0] = False
             gc.collect()
             gc.collect()
             print("Cache refresh done (ok=" + str(ok_cache) + "). Resuming.")
@@ -2977,7 +3080,7 @@ while True:
             gc.collect()
         else:
             print("Preview skipped — no network.")
-        _preview_pending[0] = False   # cleared AFTER fetch so /preview-status is accurate
+        _preview_pending[0] = False
         continue
 
     if _preview_led_id[0]:
@@ -3019,9 +3122,6 @@ while True:
         safe_delay(cycle_sleep_secs)
         continue
 
-    # No favorites selected — skip the full-feed fetch entirely (parsing ~1000+
-    # signs for nothing starves the web server). Show the amber prompt and keep
-    # the web UI responsive; fetching resumes once favsign_list is populated.
     if not favsign_list:
         print("No favorites selected — skipping fetch. Showing prompt.")
         matched_signs = []
@@ -3031,7 +3131,6 @@ while True:
         safe_delay(cycle_sleep_secs)
         continue
 
-    # --- Decide whether to (re)fetch this pass ---
     now = time.monotonic()
     need_fetch = (_fetch_now[0] or not have_fetched
                   or (now - last_fetch) >= cycle_sleep_secs)
@@ -3039,7 +3138,6 @@ while True:
 
     if need_fetch:
         print("Fetching 511NY signs data...")
-        # Fresh TLS session before each fetch.
         if pool is not None:
             try:
                 ssl_context = ssl.create_default_context()
@@ -3122,8 +3220,6 @@ while True:
                 gc.collect()
                 print("Parsed " + str(parsed) + " signs. Matched " + str(len(new_matched))
                       + ". Free RAM: " + str(gc.mem_free()))
-                # Only replace the live list on a clean parse; on a parse error
-                # (-1) keep the previous matched_signs so the LED keeps rotating.
                 if parsed >= 0:
                     matched_signs = new_matched
 
@@ -3144,7 +3240,6 @@ while True:
         have_fetched = True
         poll_server()
 
-    # --- Display pass: rotate through the cached matched_signs once ---
     if not matched_signs:
         print("Favorites set but none found in feed — showing notice.")
         matrixportal.set_text_color(dim(COLOR_AMBER), 0)
